@@ -14,6 +14,7 @@
       <h1 class="mono">{{ run.run_id }}</h1>
       <p class="sub">{{ run.cfg.model }}（思考 {{ run.thinking_text }}）
         · 裁判 {{ run.cfg.judge_model }}（思考 {{ run.judge_thinking_text }}）
+        {% if run.cfg.judge_endpoint and run.cfg.judge_endpoint != run.cfg.endpoint %}· 裁判端点 {{ run.cfg.judge_endpoint }}{% endif %}
         {% if run.cfg.data %}· {{ run.cfg.data }}{% endif %}</p>
     </div>
   </div>
@@ -140,7 +141,7 @@
   {% if items %}
   <section class="card">
     <div class="card-head">
-      <h2>逐题明细</h2>
+      <h2>逐题明细 <span class="hint">长文本单元格可滚动查看全文</span></h2>
       <div class="filters">
         <input type="search" id="filter-input" placeholder="搜索问题或回答…">
         <select id="filter-grade">
@@ -162,9 +163,9 @@
         {% for it in items %}
           <tr data-grade="{{ it.grade }}">
             <td class="mono">{{ it.original_index }}{% if it.has_image %} <small title="该题含图片">图</small>{% endif %}</td>
-            <td class="wide">{{ it.problem }}</td>
-            <td>{{ it.answer }}</td>
-            <td class="wide"><span class="clip" title="{{ it.prediction }}">{{ it.prediction_short }}</span></td>
+            <td class="wide"><div class="cell-scroll">{{ it.problem or '' }}</div></td>
+            <td class="wide"><div class="cell-scroll">{{ it.answer or '' }}</div></td>
+            <td class="wide"><div class="cell-scroll">{{ it.prediction or '' }}</div></td>
             <td><span class="grade {{ it.grade }}">{{ it.grade }}</span></td>
             <td>{{ it.completion_tokens }}</td>
             <td>{{ it.total_s }}</td>

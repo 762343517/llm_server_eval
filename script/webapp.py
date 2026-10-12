@@ -19,6 +19,7 @@
 """
 import argparse
 import csv
+import json
 import os
 import sys
 from urllib.parse import quote as urlquote
@@ -68,9 +69,16 @@ EFFORT_OPTIONS = [(v, EFFORT_LABELS[v]) for v in eval_core.EFFORT_CHOICES]
 
 
 def defaults():
-    return {
+    """表单默认值：本进程首次启动用静态默认，之后沿用上次提交的配置。
+
+    历史配置落在 runs/.last_config.json（runs/ 已在 .gitignore 中），
+    因此从任务详情页返回首页、或在首页删除任务后重新渲染，表单内容都不会被清空。
+    """
+    d = {
         "endpoint": DEFAULT_ENDPOINT,
         "api_key": DEFAULT_API_KEY,
+        "judge_endpoint": "",
+        "judge_api_key": "",
         "model": "GLM-5.2-zhipu",
         "judge_model": "DeepSeek-V4-Flash-0731",
         "data": eval_core.DEFAULT_DATA,
@@ -86,6 +94,50 @@ def defaults():
         "max_tokens_cap": 65536,
         "max_incomplete_attempts": 2,
     }
+    saved = load_last_cfg()
+    for k, v in saved.items():
+        if k in d and v is not None:
+            d[k] = v
+    return d
+
+
+LAST_CFG_NAME = ".last_config.json"
+
+
+def _last_cfg_path():
+    return os.path.join(run_manager.RUNS_DIR, LAST_CFG_NAME)
+
+
+def last_cfg_mtime():
+    """上次提交配置的写入时间；没有配置文件时返回 0。"""
+    try:
+        return os.path.getmtime(_last_cfg_path())
+    except OSError:
+        return 0.0
+
+
+def load_last_cfg():
+    """读取上次提交的配置；文件缺失/损坏时返回空 dict。"""
+    try:
+        with open(_last_cfg_path(), encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def save_last_cfg(cfg):
+    """落盘上次配置（含密钥，权限 600），失败不影响评测启动。"""
+    path = _last_cfg_path()
+    try:
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, ensure_ascii=False, indent=2)
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
+    except OSError:
+        pass
 
 
 def _resolve_path(raw):
@@ -206,8 +258,14 @@ def index(request: Request):
     datasets = eval_core.available_datasets()
     for d in datasets:
         d["is_csv"] = d["path"].lower().endswith(".csv")
+    data_defaults = defaults()
+    # 上次用的是内置列表之外的路径时，回填到「自定义数据集路径」而不是丢掉
+    known = {d["path"] for d in datasets}
+    custom_data = "" if data_defaults["data"] in known else data_defaults["data"]
     return templates.TemplateResponse(request, "index.html", {
-        "defaults": defaults(),
+        "defaults": data_defaults,
+        "custom_data": custom_data,
+        "saved_cfg_at": last_cfg_mtime(),
         "runs": runs,
         "datasets": datasets,
         "data_exists": any(d["exists"] for d in datasets),
@@ -220,6 +278,8 @@ def index(request: Request):
 def start(
     endpoint: str = Form(...),
     api_key: str = Form(""),
+    judge_endpoint: str = Form(""),
+    judge_api_key: str = Form(""),
     model: str = Form(...),
     judge_model: str = Form(...),
     data: str = Form(eval_core.DEFAULT_DATA),
@@ -237,10 +297,18 @@ def start(
     max_incomplete_attempts: int = Form(2),
 ):
     data = data_custom.strip() or data.strip()
+    endpoint = endpoint.strip()
     if not model.strip() or not judge_model.strip():
         raise HTTPException(400, "模型与裁判模型不能为空")
     if not endpoint.startswith("http"):
-        raise HTTPException(400, "API 端点必须以 http 开头")
+        raise HTTPException(400, "被测模型 API 端点必须以 http 开头")
+    # 裁判端点/密钥留空时复用被测模型的，二者可指向不同服务
+    judge_endpoint_raw = judge_endpoint.strip()
+    judge_api_key_raw = judge_api_key.strip()
+    judge_endpoint = judge_endpoint_raw or endpoint
+    if not judge_endpoint.startswith("http"):
+        raise HTTPException(400, "裁判模型 API 端点必须以 http 开头")
+    judge_api_key = judge_api_key_raw or api_key.strip()
     if not os.path.exists(data):
         raise HTTPException(400, f"数据集不存在: {data}")
     if max_tokens_cap < max_tokens:
@@ -253,7 +321,8 @@ def start(
         if value not in eval_core.EFFORT_CHOICES:
             raise HTTPException(400, f"{label}取值非法: {value}")
     cfg = {
-        "endpoint": endpoint.strip(), "api_key": api_key.strip(),
+        "endpoint": endpoint, "api_key": api_key.strip(),
+        "judge_endpoint": judge_endpoint, "judge_api_key": judge_api_key,
         "model": model.strip(), "judge_model": judge_model.strip(),
         "data": data.strip(),
         "thinking": thinking, "reasoning_effort": reasoning_effort,
@@ -265,6 +334,11 @@ def start(
         "max_tokens": max_tokens, "max_tokens_cap": max_tokens_cap,
         "max_incomplete_attempts": max(1, max_incomplete_attempts),
     }
+    # 表单默认值沿用「原样填写」的裁判端点/密钥，保留“留空=复用被测模型”的状态
+    saved = {k: cfg[k] for k in defaults() if k in cfg}
+    saved["judge_endpoint"] = judge_endpoint_raw
+    saved["judge_api_key"] = judge_api_key_raw
+    save_last_cfg(saved)
     run_id = manager.start(cfg)
     return RedirectResponse(f"/runs/{run_id}", status_code=303)
 
@@ -274,10 +348,8 @@ def run_page(request: Request, run_id: str):
     snap = manager.get(run_id)
     if not snap:
         raise HTTPException(404, "任务不存在")
+    # 逐题明细整段下发，页面用可滚动单元格完整展示，不再截断文本
     items = manager.read_items(run_id, limit=300)
-    for it in items:
-        pred = it.get("prediction") or ""
-        it["prediction_short"] = pred[:300]
     snap["status_text"] = STATUS_TEXT.get(snap.get("status"), snap.get("status"))
     cfg = snap.get("cfg") or {}
     snap["thinking_text"] = eval_core.thinking_label(

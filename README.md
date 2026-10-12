@@ -46,3 +46,19 @@ Web 表单中对应「被测/裁判模型思考」与「…思考强度」四个
 `reasoning_effort` / `judge_thinking` / `judge_reasoning_effort`），便于对比不同配置。
 
 注：关闭思考时 `reasoning_tokens_avg` 会趋于 0，`--max-tokens` 的截断翻倍重试逻辑不再触发。
+
+## 被测/裁判模型的服务配置
+被测模型与裁判模型可以指向不同的服务，端点与密钥分别配置：
+
+```bash
+--endpoint / --api-key                  # 被测模型
+--judge-endpoint / --judge-api-key      # 裁判模型；留空则复用被测模型的端点/密钥
+```
+
+Web 表单中对应「被测模型」与「裁判模型」两个分组，裁判模型的端点/密钥留空即复用上方配置；
+生效值记录在 `runs/<id>/meta.json` 的 `cfg.judge_endpoint` / `cfg.judge_api_key`（密钥打码）与任务日志中。
+
+Web 表单会记住上次提交的配置（存于 `runs/.last_config.json`，权限 600，含密钥），
+刷新首页、从任务详情页返回、或在首页删除任务后重新渲染，表单内容均保持不变；
+删除该文件即可恢复为内置默认值。任务详情页的「逐题明细」中，问题/标准答案/模型回答
+以可滚动单元格完整展示，不再截断文本。

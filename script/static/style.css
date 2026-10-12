@@ -98,6 +98,12 @@ footer {
 /* ---------------------------------------------------------- 表单 */
 .grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 16px 20px; }
 .grid .span-2 { grid-column: span 2; }
+.grid .group-title {
+  display: flex; align-items: baseline; gap: 10px;
+  font-size: 13px; font-weight: 700; color: #39445a;
+  border-bottom: 1px solid var(--line); padding-bottom: 8px;
+}
+.grid .group-title .hint { font-weight: 400; }
 .grid label { display: flex; flex-direction: column; gap: 6px; }
 .grid label > span { font-size: 12.5px; font-weight: 600; color: #39445a; }
 .grid label em { font-style: normal; font-weight: 400; color: var(--muted); }
@@ -131,10 +137,12 @@ thead th {
 tbody td { padding: 9px 12px; border-bottom: 1px solid #f0f3f8; vertical-align: top; }
 tbody tr:last-child td { border-bottom: none; }
 tbody tr:hover { background: #fafbff; }
-td.wide { max-width: 320px; }
-.clip {
-  display: block; max-width: 320px; overflow: hidden; text-overflow: ellipsis;
-  white-space: nowrap;
+td.wide { max-width: 380px; }
+/* 逐题明细：长文本整段展示，超出高度/宽度时在单元格内滚动查看 */
+.cell-scroll {
+  max-width: 380px; max-height: 180px; overflow: auto;
+  white-space: pre-wrap; overflow-wrap: anywhere;
+  font-size: 12.5px; line-height: 1.5; padding-right: 6px;
 }
 
 /* ---------------------------------------------------------- CSV 表格查看 */

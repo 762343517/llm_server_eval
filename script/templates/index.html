@@ -26,10 +26,12 @@
   <section class="card">
     <div class="card-head">
       <h2>新建评测</h2>
-      <span class="hint">所有配置仅作用于本次任务，结束后不保存密钥</span>
+      <span class="hint">配置会记住上次提交的内容（密钥仅保存在本机 runs/.last_config.json）</span>
     </div>
 
     <form method="post" action="/start" class="grid">
+      <div class="span-2 group-title">被测模型</div>
+
       <label class="span-2">
         <span>API 端点 <em>OpenAI 兼容 /v1/chat/completions</em></span>
         <input type="text" name="endpoint" value="{{ defaults.endpoint }}" required>
@@ -40,18 +42,13 @@
         <input type="text" name="api_key" value="{{ defaults.api_key }}" autocomplete="off">
       </label>
 
-      <label>
-        <span>被测模型</span>
+      <label class="span-2">
+        <span>模型名</span>
         <input type="text" name="model" value="{{ defaults.model }}" required>
       </label>
 
       <label>
-        <span>裁判模型</span>
-        <input type="text" name="judge_model" value="{{ defaults.judge_model }}" required>
-      </label>
-
-      <label>
-        <span>被测模型思考 <em>不传则由服务端默认</em></span>
+        <span>思考 <em>不传则由服务端默认</em></span>
         <select name="thinking">
           {% for v, label in thinking_options %}
           <option value="{{ v }}"{% if v == defaults.thinking %} selected{% endif %}>{{ label }}</option>
@@ -60,7 +57,7 @@
       </label>
 
       <label>
-        <span>被测模型思考强度 <em>仅开启思考时生效</em></span>
+        <span>思考强度 <em>仅开启思考时生效</em></span>
         <select name="reasoning_effort">
           {% for v, label in effort_options %}
           <option value="{{ v }}"{% if v == defaults.reasoning_effort %} selected{% endif %}>{{ label }}</option>
@@ -68,8 +65,27 @@
         </select>
       </label>
 
+      <div class="span-2 group-title">裁判模型 <span class="hint">可与被测模型使用不同的服务，端点/密钥留空则复用上方配置</span></div>
+
+      <label class="span-2">
+        <span>裁判 API 端点 <em>留空 = 与被测模型相同</em></span>
+        <input type="text" name="judge_endpoint" value="{{ defaults.judge_endpoint }}"
+               placeholder="{{ defaults.endpoint }}" autocomplete="off">
+      </label>
+
+      <label class="span-2">
+        <span>裁判 API Key <em>留空 = 与被测模型相同</em></span>
+        <input type="text" name="judge_api_key" value="{{ defaults.judge_api_key }}"
+               placeholder="留空 = 与被测模型相同" autocomplete="off">
+      </label>
+
+      <label class="span-2">
+        <span>裁判模型名</span>
+        <input type="text" name="judge_model" value="{{ defaults.judge_model }}" required>
+      </label>
+
       <label>
-        <span>裁判模型思考 <em>关闭可省时省 token</em></span>
+        <span>裁判思考 <em>关闭可省时省 token</em></span>
         <select name="judge_thinking">
           {% for v, label in thinking_options %}
           <option value="{{ v }}"{% if v == defaults.judge_thinking %} selected{% endif %}>{{ label }}</option>
@@ -78,7 +94,7 @@
       </label>
 
       <label>
-        <span>裁判模型思考强度 <em>仅开启思考时生效</em></span>
+        <span>裁判思考强度 <em>仅开启思考时生效</em></span>
         <select name="judge_reasoning_effort">
           {% for v, label in effort_options %}
           <option value="{{ v }}"{% if v == defaults.judge_reasoning_effort %} selected{% endif %}>{{ label }}</option>
@@ -86,11 +102,13 @@
         </select>
       </label>
 
+      <div class="span-2 group-title">数据集与运行参数</div>
+
       <label class="span-2">
         <span>数据集 <em>CSV 按 SimpleQA 结构解析，parquet 按 HLE 结构解析</em></span>
         <select name="data">
           {% for d in datasets %}
-          <option value="{{ d.path }}"{% if not d.exists %} disabled{% endif %}>
+          <option value="{{ d.path }}"{% if d.path == defaults.data %} selected{% endif %}{% if not d.exists %} disabled{% endif %}>
             {{ d.name }} — {{ d.path }}{% if not d.exists %}（文件缺失）{% endif %}
           </option>
           {% endfor %}
@@ -111,7 +129,7 @@
 
       <label class="span-2">
         <span>自定义数据集路径 <em>可选；填写后覆盖上方选择</em></span>
-        <input type="text" name="data_custom" value="" autocomplete="off"
+        <input type="text" name="data_custom" value="{{ custom_data }}" autocomplete="off"
                placeholder="dataset/HLE/test-00000-of-00001.parquet">
       </label>
 
@@ -219,5 +237,8 @@
 </main>
 
 <footer>SimpleQA-Verified / HLE · pass@1 由 LLM 裁判判定，覆盖率不足时请关注「未完成」题数</footer>
+
+<script>window.SAVED_CFG_AT = {{ saved_cfg_at }};</script>
+<script src="/static/index.js"></script>
 </body>
 </html>

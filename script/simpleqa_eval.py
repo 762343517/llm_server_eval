@@ -110,6 +110,10 @@ def main():
     ap.add_argument("--judge-model", required=True)
     ap.add_argument("--endpoint", default=DEFAULT_ENDPOINT)
     ap.add_argument("--api-key", default=DEFAULT_API_KEY)
+    ap.add_argument("--judge-endpoint", default="",
+                    help="裁判模型端点；留空则复用 --endpoint")
+    ap.add_argument("--judge-api-key", default="",
+                    help="裁判模型密钥；留空则复用 --api-key")
     ap.add_argument("--data", default=eval_core.DEFAULT_DATA,
                     help="数据集路径：.csv 按 SimpleQA 结构，.parquet 按 HLE 结构")
     ap.add_argument("--thinking", dest="thinking", action="store_const",
@@ -144,6 +148,8 @@ def main():
     cfg = {
         "endpoint": args.endpoint,
         "api_key": args.api_key,
+        "judge_endpoint": args.judge_endpoint,
+        "judge_api_key": args.judge_api_key,
         "model": args.model,
         "judge_model": args.judge_model,
         "data": args.data,

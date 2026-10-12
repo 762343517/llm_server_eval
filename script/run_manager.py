@@ -119,9 +119,10 @@ class RunState:
             elif kind == "judge_start":
                 self.phase = "judge"
                 self.judge.update({"total": p["todo"], "cached": p["cached"]})
-                self.log("[judge] 模型 {} 缓存 {} 待判 {} 并发 {} 思考 {}".format(
-                    p["model"], p["cached"], p["todo"], p["concurrency"],
-                    p.get("thinking", "-")))
+                self.log("[judge] 模型 {} 端点 {} 缓存 {} 待判 {} 并发 {} 思考 {}"
+                         .format(p["model"], p.get("endpoint", "-"), p["cached"],
+                                 p["todo"], p["concurrency"],
+                                 p.get("thinking", "-")))
             elif kind == "judge_progress":
                 self.judge.update(p)
             elif kind == "judge_end":
@@ -210,12 +211,15 @@ class RunManager:
         out = os.path.join(self.runs_dir, run_id, "out")
         os.makedirs(os.path.dirname(out), exist_ok=True)
         safe_cfg = dict(cfg)
-        safe_cfg["api_key"] = _mask(safe_cfg.get("api_key", ""))
+        for k in ("api_key", "judge_api_key"):
+            if safe_cfg.get(k):
+                safe_cfg[k] = _mask(safe_cfg[k])
         state = RunState(run_id, safe_cfg, out)
         with self._lock:
             self._states[run_id] = state
-        state.log("[启动] 模型 {} 端点 {}".format(cfg.get("model"),
-                                                  cfg.get("endpoint")))
+        state.log("[启动] 模型 {} 端点 {} 裁判模型 {} 裁判端点 {}".format(
+            cfg.get("model"), cfg.get("endpoint"), cfg.get("judge_model"),
+            cfg.get("judge_endpoint") or cfg.get("endpoint")))
         state.save()
         t = threading.Thread(target=self._worker, args=(state, cfg),
                              daemon=True, name=f"run-{run_id}")

@@ -523,7 +523,8 @@ def run_eval(cfg, on_event=None, should_stop=None):
     """执行一次完整评测（生成 -> 裁判 -> 汇总）。
 
     cfg 必填: endpoint, api_key, model, judge_model, out
-    cfg 可选: data, concurrency, judge_concurrency, limit, seed,
+    cfg 可选: judge_endpoint, judge_api_key（留空则复用被测模型的端点/密钥）、
+             data, concurrency, judge_concurrency, limit, seed,
              max_tokens, max_tokens_cap, max_incomplete_attempts
     返回 summary dict；无可用记录时返回 None。
     """
@@ -548,8 +549,11 @@ def run_eval(cfg, on_event=None, should_stop=None):
 
     client = HttpClient(cfg["endpoint"], cfg["api_key"], should_stop=should_stop,
                         extra=build_think_extra(thinking, reasoning_effort))
+    # 裁判模型可使用独立端点/密钥，留空时回落到被测模型的配置
+    judge_endpoint = str(cfg.get("judge_endpoint") or cfg["endpoint"])
+    judge_api_key = str(cfg.get("judge_api_key") or cfg["api_key"])
     judge_client = HttpClient(
-        cfg["endpoint"], cfg["api_key"], should_stop=should_stop,
+        judge_endpoint, judge_api_key, should_stop=should_stop,
         extra=build_think_extra(judge_thinking, judge_reasoning_effort))
 
     df, images = load_dataset(data, limit=limit, seed=seed, on_event=on_event)
@@ -691,7 +695,7 @@ def run_eval(cfg, on_event=None, should_stop=None):
     to_judge = [r for r in gen_recs.values() if r["original_index"] not in judged]
     on_event("judge_start", {
         "model": judge_model, "cached": len(judged), "todo": len(to_judge),
-        "concurrency": judge_concurrency,
+        "concurrency": judge_concurrency, "endpoint": judge_endpoint,
         "thinking": thinking_label(judge_thinking, judge_reasoning_effort),
     })
 
