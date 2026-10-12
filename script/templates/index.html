@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>大模型评测平台</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <span class="logo">LLM</span>
+    <div>
+      <h1>大模型精度与性能评测平台</h1>
+      <p class="sub">SimpleQA-Verified / HLE · 事实性与推理精度 (Pass@1) 评测</p>
+    </div>
+  </div>
+  <a class="btn ghost" href="/health" target="_blank">健康检查</a>
+</header>
+
+<main>
+  {% if not data_exists %}
+  <div class="alert warn">未找到任何内置数据集文件，请确认 dataset/ 目录后再启动。</div>
+  {% endif %}
+
+  <section class="card">
+    <div class="card-head">
+      <h2>新建评测</h2>
+      <span class="hint">所有配置仅作用于本次任务，结束后不保存密钥</span>
+    </div>
+
+    <form method="post" action="/start" class="grid">
+      <label class="span-2">
+        <span>API 端点 <em>OpenAI 兼容 /v1/chat/completions</em></span>
+        <input type="text" name="endpoint" value="{{ defaults.endpoint }}" required>
+      </label>
+
+      <label class="span-2">
+        <span>API Key</span>
+        <input type="text" name="api_key" value="{{ defaults.api_key }}" autocomplete="off">
+      </label>
+
+      <label>
+        <span>被测模型</span>
+        <input type="text" name="model" value="{{ defaults.model }}" required>
+      </label>
+
+      <label>
+        <span>裁判模型</span>
+        <input type="text" name="judge_model" value="{{ defaults.judge_model }}" required>
+      </label>
+
+      <label class="span-2">
+        <span>数据集 <em>CSV 按 SimpleQA 结构解析，parquet 按 HLE 结构解析</em></span>
+        <select name="data">
+          {% for d in datasets %}
+          <option value="{{ d.path }}"{% if not d.exists %} disabled{% endif %}>
+            {{ d.name }} — {{ d.path }}{% if not d.exists %}（文件缺失）{% endif %}
+          </option>
+          {% endfor %}
+        </select>
+      </label>
+
+      <label class="span-2">
+        <span>自定义数据集路径 <em>可选；填写后覆盖上方选择</em></span>
+        <input type="text" name="data_custom" value="" autocomplete="off"
+               placeholder="dataset/HLE/test-00000-of-00001.parquet">
+      </label>
+
+      <label>
+        <span>生成并发</span>
+        <input type="number" name="concurrency" value="{{ defaults.concurrency }}" min="1" max="64">
+      </label>
+
+      <label>
+        <span>裁判并发</span>
+        <input type="number" name="judge_concurrency" value="{{ defaults.judge_concurrency }}" min="1" max="64">
+      </label>
+
+      <label>
+        <span>题量上限 <em>0 表示全量</em></span>
+        <input type="number" name="limit" value="{{ defaults.limit }}" min="0">
+      </label>
+
+      <label>
+        <span>采样种子</span>
+        <input type="number" name="seed" value="{{ defaults.seed }}" min="0">
+      </label>
+
+      <label>
+        <span>max_tokens 首轮 <em>思考截断自动翻倍</em></span>
+        <input type="number" name="max_tokens" value="{{ defaults.max_tokens }}" min="256">
+      </label>
+
+      <label>
+        <span>max_tokens 上限</span>
+        <input type="number" name="max_tokens_cap" value="{{ defaults.max_tokens_cap }}" min="256">
+      </label>
+
+      <label class="span-2">
+        <span>截断重试次数上限 <em>超过则计入「未完成」并不再重跑</em></span>
+        <input type="number" name="max_incomplete_attempts" value="{{ defaults.max_incomplete_attempts }}" min="1" max="10">
+      </label>
+
+      <div class="span-2 actions">
+        <button type="submit" class="btn primary">启动评测</button>
+        <span class="hint">任务在后台线程执行，可随时关闭页面，稍后回到此页查看进度</span>
+      </div>
+    </form>
+  </section>
+
+  <section class="card">
+    <div class="card-head">
+      <h2>任务列表</h2>
+      <span class="hint">共 {{ runs | length }} 个任务</span>
+    </div>
+
+    {% if runs %}
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>任务</th><th>模型</th><th>状态</th><th>进度</th>
+            <th>Pass@1</th><th>完成/应有</th><th>开始时间</th><th>操作</th>
+          </tr>
+        </thead>
+        <tbody>
+        {% for r in runs %}
+          <tr>
+            <td>
+              <a class="mono" href="/runs/{{ r.run_id }}">{{ r.run_id }}</a>
+              {% if r.cfg.data %}<br><small class="muted">{{ r.cfg.data.split('/')[-1] }}</small>{% endif %}
+            </td>
+            <td>{{ r.cfg.model }}</td>
+            <td>
+              <span class="badge {{ r.status }}">{{ r.status_text }}</span>
+              {% if r.status == 'running' %}<span class="dot"></span>{% endif %}
+            </td>
+            <td>
+              <div class="mini-bar"><i style="width: {{ r.pct }}%"></i></div>
+              <small>{{ r.stage }} {{ r.pct }}%</small>
+            </td>
+            <td>
+              {% if r.pass_at_1 is not none %}
+                <strong>{{ '%.2f%%' | format(r.pass_at_1 * 100) }}</strong>
+              {% else %}<span class="muted">—</span>{% endif %}
+            </td>
+            <td>
+              {% if r.n_done is not none %}{{ r.n_done }} / {{ r.expected }}
+              {% else %}<span class="muted">—</span>{% endif %}
+            </td>
+            <td class="nowrap">{{ r.started_at_str }}</td>
+            <td class="nowrap">
+              <a class="btn tiny" href="/runs/{{ r.run_id }}">查看</a>
+              <a class="btn tiny ghost" href="/runs/{{ r.run_id }}/download.csv">CSV</a>
+              <form method="post" action="/runs/{{ r.run_id }}/delete" class="inline"
+                    onsubmit="return confirm('确认删除该任务及其结果文件？');">
+                <button class="btn tiny danger" type="submit">删除</button>
+              </form>
+            </td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+    <p class="empty">还没有任务，填写上方配置后点击「启动评测」。</p>
+    {% endif %}
+  </section>
+</main>
+
+<footer>SimpleQA-Verified / HLE · pass@1 由 LLM 裁判判定，覆盖率不足时请关注「未完成」题数</footer>
+</body>
+</html>

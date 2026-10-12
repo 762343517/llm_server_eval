@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{ run.run_id }} · 评测任务</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <a class="back" href="/">←</a>
+    <div>
+      <h1 class="mono">{{ run.run_id }}</h1>
+      <p class="sub">{{ run.cfg.model }} · 裁判 {{ run.cfg.judge_model }}{% if run.cfg.data %} · {{ run.cfg.data }}{% endif %}</p>
+    </div>
+  </div>
+  <div class="head-actions">
+    <span class="badge {{ run.status }}" id="status-badge">{{ run.status_text }}</span>
+    <a class="btn ghost" href="/runs/{{ run.run_id }}/download.csv">下载 CSV</a>
+    <a class="btn ghost" href="/runs/{{ run.run_id }}/download.json">下载 JSON</a>
+    {% if run.status == 'running' %}
+    <button class="btn danger" id="stop-btn" onclick="stopRun()">停止</button>
+    {% endif %}
+  </div>
+</header>
+
+<main>
+  <section class="card" id="progress-card">
+    <div class="card-head">
+      <h2 id="stage-title">{{ run.progress.stage if run.progress else '准备中' }}</h2>
+      <span class="hint" id="elapsed">已运行 <b>{{ '%.1f' | format(run.duration_s / 60) }}</b> 分钟</span>
+    </div>
+    <div class="bar"><i id="bar-fill" style="width: {{ run.progress.pct if run.progress else 0 }}%"></i></div>
+    <div class="bar-text" id="bar-text">{{ run.progress.text if run.progress else '' }}</div>
+
+    <div class="stats">
+      <div class="stat">
+        <label>生成完成</label>
+        <b id="gen-done">{{ run.gen.done }}</b>
+        <small>/ <span id="gen-todo">{{ run.gen.todo }}</span> 待跑</small>
+      </div>
+      <div class="stat">
+        <label>生成吞吐</label>
+        <b id="gen-tps">{{ run.gen.tps }}</b><small>tps</small>
+      </div>
+      <div class="stat">
+        <label>裁判完成</label>
+        <b id="judge-done">{{ run.judge.done }}</b>
+        <small>/ <span id="judge-total">{{ run.judge.total }}</span></small>
+      </div>
+      <div class="stat">
+        <label>失败题数</label>
+        <b id="err-count">{{ run.gen.errors + run.judge.errors }}</b>
+      </div>
+      <div class="stat">
+        <label>缓存复用</label>
+        <b id="cached-valid">{{ run.gen.cached_valid }}</b><small>题</small>
+      </div>
+    </div>
+  </section>
+
+  {% if run.summary %}
+  {% set s = run.summary %}
+  <section class="card">
+    <div class="card-head">
+      <h2>评测结果</h2>
+      <span class="hint">覆盖率 {{ '%.1f%%' | format(s.coverage * 100) }}（{{ s.num_questions }} / {{ s.expected_questions }} 题）</span>
+    </div>
+
+    {% if s.coverage < 1 %}
+    <div class="alert warn">
+      有 {{ s.num_incomplete }} 题因思考超长被截断、{{ s.num_failed }} 题请求失败，
+      共 {{ s.expected_questions - s.num_questions }} 题未纳入统计。Pass@1 仅代表已完成部分。
+    </div>
+    {% endif %}
+
+    <div class="kpis">
+      <div class="kpi primary">
+        <label>Pass@1</label>
+        <b>{{ '%.2f%%' | format(s.pass_at_1 * 100) }}</b>
+        <small>95% CI {{ '%.2f%%' | format(s.pass_at_1_ci95[0] * 100) }} ~ {{ '%.2f%%' | format(s.pass_at_1_ci95[1] * 100) }}</small>
+      </div>
+      <div class="kpi">
+        <label>仅计作答</label>
+        <b>{{ '%.2f%%' | format(s.accuracy_attempted * 100) if s.accuracy_attempted is not none else '—' }}</b>
+        <small>拒答率 {{ '%.1f%%' | format(s.not_attempted_rate * 100) }}</small>
+      </div>
+      <div class="kpi ok"><label>Correct</label><b>{{ s.counts.CORRECT }}</b></div>
+      <div class="kpi bad"><label>Incorrect</label><b>{{ s.counts.INCORRECT }}</b></div>
+      <div class="kpi mute"><label>Not Attempted</label><b>{{ s.counts.NOT_ATTEMPTED }}</b></div>
+    </div>
+
+    <h3 class="sub-title">性能指标</h3>
+    <div class="kpis">
+      <div class="kpi"><label>首字延迟 P50</label><b>{{ s.ttft_visible_p50_s }}</b><small>秒</small></div>
+      <div class="kpi"><label>首字延迟 P90</label><b>{{ s.ttft_visible_p90_s }}</b><small>秒</small></div>
+      <div class="kpi"><label>单题总耗时 P50</label><b>{{ s.e2e_latency_p50_s }}</b><small>秒</small></div>
+      <div class="kpi"><label>单题总耗时 P90</label><b>{{ s.e2e_latency_p90_s }}</b><small>秒</small></div>
+      <div class="kpi"><label>可见 TPOT P50</label><b>{{ s.tpot_visible_p50_s if s.tpot_visible_p50_s is not none else '—' }}</b><small>秒</small></div>
+      <div class="kpi"><label>平均输出</label><b>{{ s.output_tokens_avg }}</b><small>token</small></div>
+      <div class="kpi"><label>其中思考</label><b>{{ s.reasoning_tokens_avg if s.reasoning_tokens_avg is not none else '—' }}</b><small>token</small></div>
+      <div class="kpi"><label>可见输出</label><b>{{ s.visible_tokens_avg if s.visible_tokens_avg is not none else '—' }}</b><small>token</small></div>
+    </div>
+
+    <div class="split">
+      <div>
+        <h3 class="sub-title">按主题</h3>
+        <div class="table-wrap short">
+          <table>
+            <thead><tr><th>主题</th><th>题数</th><th>Pass@1</th></tr></thead>
+            <tbody>
+            {% for k, v in s.by_topic.items() %}
+              <tr><td>{{ k }}</td><td>{{ v.n }}</td><td>{{ '%.2f%%' | format(v.pass_at_1 * 100) }}</td></tr>
+            {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </div>
+      <div>
+        <h3 class="sub-title">按答案类型</h3>
+        <div class="table-wrap short">
+          <table>
+            <thead><tr><th>类型</th><th>题数</th><th>Pass@1</th></tr></thead>
+            <tbody>
+            {% for k, v in s.by_answer_type.items() %}
+              <tr><td>{{ k }}</td><td>{{ v.n }}</td><td>{{ '%.2f%%' | format(v.pass_at_1 * 100) }}</td></tr>
+            {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </section>
+  {% endif %}
+
+  {% if items %}
+  <section class="card">
+    <div class="card-head">
+      <h2>逐题明细</h2>
+      <div class="filters">
+        <input type="search" id="filter-input" placeholder="搜索问题或回答…">
+        <select id="filter-grade">
+          <option value="">全部判定</option>
+          <option value="CORRECT">Correct</option>
+          <option value="INCORRECT">Incorrect</option>
+          <option value="NOT_ATTEMPTED">Not Attempted</option>
+        </select>
+        <span class="hint" id="filter-count">{{ total_items }} 行</span>
+      </div>
+    </div>
+    <div class="table-wrap tall">
+      <table id="items-table">
+        <thead>
+          <tr><th>题号</th><th>问题</th><th>标准答案</th><th>模型回答</th>
+              <th>判定</th><th>输出token</th><th>耗时s</th></tr>
+        </thead>
+        <tbody>
+        {% for it in items %}
+          <tr data-grade="{{ it.grade }}">
+            <td class="mono">{{ it.original_index }}{% if it.has_image %} <small title="该题含图片">图</small>{% endif %}</td>
+            <td class="wide">{{ it.problem }}</td>
+            <td>{{ it.answer }}</td>
+            <td class="wide"><span class="clip" title="{{ it.prediction }}">{{ it.prediction_short }}</span></td>
+            <td><span class="grade {{ it.grade }}">{{ it.grade }}</span></td>
+            <td>{{ it.completion_tokens }}</td>
+            <td>{{ it.total_s }}</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% if total_items > items | length %}
+    <p class="hint">表格展示前 {{ items | length }} 行，完整数据请下载 CSV。</p>
+    {% endif %}
+  </section>
+  {% endif %}
+
+  <section class="card">
+    <div class="card-head"><h2>运行日志</h2></div>
+    <pre class="logs" id="logs">{% for l in run.logs %}[{{ l.t }}] {{ l.msg }}
+{% endfor %}</pre>
+  </section>
+</main>
+
+<script>
+window.RUN_ID = "{{ run.run_id }}";
+window.RUN_STATUS = "{{ run.status }}";
+</script>
+<script src="/static/app.js"></script>
+</body>
+</html>

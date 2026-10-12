@@ -1,0 +1,10 @@
+# 评测框架运行依赖（Python 3.10）
+# 安装: python3 -m pip install -r requirements.txt
+fastapi==0.143.0
+uvicorn[standard]==0.54.0
+python-multipart==0.0.32
+jinja2>=3.0.3
+requests>=2.25.1
+pandas==2.3.3
+pyarrow==25.0.1
+tiktoken==0.14.0
