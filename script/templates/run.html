@@ -12,10 +12,6 @@
     <a class="back" href="/">←</a>
     <div>
       <h1 class="mono">{{ run.run_id }}</h1>
-      <p class="sub">{{ run.cfg.model }}（思考 {{ run.thinking_text }}）
-        · 裁判 {{ run.cfg.judge_model }}（思考 {{ run.judge_thinking_text }}）
-        {% if run.cfg.judge_endpoint and run.cfg.judge_endpoint != run.cfg.endpoint %}· 裁判端点 {{ run.cfg.judge_endpoint }}{% endif %}
-        {% if run.cfg.data %}· {{ run.cfg.data }}{% endif %}</p>
     </div>
   </div>
   <div class="head-actions">
@@ -60,6 +56,54 @@
       <div class="stat">
         <label>缓存复用</label>
         <b id="cached-valid">{{ run.gen.cached_valid }}</b><small>题</small>
+      </div>
+    </div>
+  </section>
+
+  <section class="card" id="config-card">
+    <div class="card-head">
+      <h2>运行配置</h2>
+      <span class="hint">开始 {{ run.started_at_str }}{% if run.finished_at_str %} · 结束 {{ run.finished_at_str }}{% endif %}
+        · 耗时 {{ '%.1f' | format(run.duration_s / 60) }} 分钟</span>
+    </div>
+
+    <div class="config-grid">
+      <div class="config-block">
+        <h3 class="group-title">被测模型</h3>
+        <dl class="kv">
+          <dt>模型名</dt><dd>{{ run.cfg.model or '—' }}</dd>
+          <dt>API 端点</dt><dd class="mono">{{ run.cfg.endpoint or '—' }}</dd>
+          <dt>API Key</dt><dd class="mono">{{ run.cfg.api_key or '（未记录）' }}</dd>
+          <dt>思考</dt><dd>{{ run.thinking_text }}</dd>
+          <dt>生成并发</dt><dd>{{ run.cfg.concurrency if run.cfg.concurrency is not none else '—' }}</dd>
+        </dl>
+      </div>
+
+      <div class="config-block">
+        <h3 class="group-title">裁判模型</h3>
+        <dl class="kv">
+          <dt>模型名</dt><dd>{{ run.cfg.judge_model or '—' }}</dd>
+          <dt>API 端点</dt><dd class="mono">{{ run.cfg.judge_endpoint or run.cfg.endpoint or '—' }}
+            {% if not run.cfg.judge_endpoint or run.cfg.judge_endpoint == run.cfg.endpoint %}
+            <span class="hint">（复用被测模型）</span>{% endif %}</dd>
+          <dt>API Key</dt><dd class="mono">{{ run.cfg.judge_api_key or run.cfg.api_key or '（未记录）' }}
+            {% if not run.cfg.judge_api_key or run.cfg.judge_api_key == run.cfg.api_key %}
+            <span class="hint">（复用被测模型）</span>{% endif %}</dd>
+          <dt>思考</dt><dd>{{ run.judge_thinking_text }}</dd>
+          <dt>裁判并发</dt><dd>{{ run.cfg.judge_concurrency if run.cfg.judge_concurrency is not none else '—' }}</dd>
+        </dl>
+      </div>
+
+      <div class="config-block">
+        <h3 class="group-title">数据集与运行参数</h3>
+        <dl class="kv">
+          <dt>数据集</dt><dd class="mono">{{ run.cfg.data or '—' }}</dd>
+          <dt>题量上限</dt><dd>{{ run.cfg.limit if run.cfg.limit else '全量' }}</dd>
+          <dt>采样种子</dt><dd>{{ run.cfg.seed if run.cfg.seed is not none else '—' }}</dd>
+          <dt>max_tokens</dt><dd>首轮 {{ run.cfg.max_tokens if run.cfg.max_tokens is not none else '—' }}
+            · 上限 {{ run.cfg.max_tokens_cap if run.cfg.max_tokens_cap is not none else '—' }}</dd>
+          <dt>截断重试</dt><dd>最多 {{ run.cfg.max_incomplete_attempts if run.cfg.max_incomplete_attempts is not none else '—' }} 次</dd>
+        </dl>
       </div>
     </div>
   </section>
