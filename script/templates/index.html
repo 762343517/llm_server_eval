@@ -50,6 +50,42 @@
         <input type="text" name="judge_model" value="{{ defaults.judge_model }}" required>
       </label>
 
+      <label>
+        <span>被测模型思考 <em>不传则由服务端默认</em></span>
+        <select name="thinking">
+          {% for v, label in thinking_options %}
+          <option value="{{ v }}"{% if v == defaults.thinking %} selected{% endif %}>{{ label }}</option>
+          {% endfor %}
+        </select>
+      </label>
+
+      <label>
+        <span>被测模型思考强度 <em>仅开启思考时生效</em></span>
+        <select name="reasoning_effort">
+          {% for v, label in effort_options %}
+          <option value="{{ v }}"{% if v == defaults.reasoning_effort %} selected{% endif %}>{{ label }}</option>
+          {% endfor %}
+        </select>
+      </label>
+
+      <label>
+        <span>裁判模型思考 <em>关闭可省时省 token</em></span>
+        <select name="judge_thinking">
+          {% for v, label in thinking_options %}
+          <option value="{{ v }}"{% if v == defaults.judge_thinking %} selected{% endif %}>{{ label }}</option>
+          {% endfor %}
+        </select>
+      </label>
+
+      <label>
+        <span>裁判模型思考强度 <em>仅开启思考时生效</em></span>
+        <select name="judge_reasoning_effort">
+          {% for v, label in effort_options %}
+          <option value="{{ v }}"{% if v == defaults.judge_reasoning_effort %} selected{% endif %}>{{ label }}</option>
+          {% endfor %}
+        </select>
+      </label>
+
       <label class="span-2">
         <span>数据集 <em>CSV 按 SimpleQA 结构解析，parquet 按 HLE 结构解析</em></span>
         <select name="data">

@@ -1,0 +1,162 @@
+{
+  "run_id": "20261012-090158-e1e2",
+  "status": "succeeded",
+  "phase": "done",
+  "cfg": {
+    "endpoint": "https://api.deepseek.com/chat/completions",
+    "api_key": "sk-807***cfad",
+    "model": "deepseek-v4-flash",
+    "judge_model": "deepseek-v4-flash",
+    "data": "dataset/SimpleQA-Verified/simpleqa_verified.csv",
+    "thinking": "enabled",
+    "reasoning_effort": "",
+    "judge_thinking": "",
+    "judge_reasoning_effort": "",
+    "concurrency": 3,
+    "judge_concurrency": 3,
+    "limit": 3,
+    "seed": 0,
+    "max_tokens": 32768,
+    "max_tokens_cap": 65536,
+    "max_incomplete_attempts": 2
+  },
+  "error": null,
+  "started_at": 1791795718.923927,
+  "finished_at": 1791795726.124966,
+  "started_at_str": "2026-10-12 09:01:58",
+  "finished_at_str": "2026-10-12 09:02:06",
+  "duration_s": 7.2,
+  "load": {
+    "loaded": 3,
+    "total": 3,
+    "images": 0
+  },
+  "gen": {
+    "done": 3,
+    "total": 3,
+    "errors": 0,
+    "tokens": 1453,
+    "elapsed_s": 5.0,
+    "tps": 288.3,
+    "cached_valid": 0,
+    "cached_incomplete": 0,
+    "stuck": 0,
+    "todo": 3,
+    "max_tokens": 32768
+  },
+  "judge": {
+    "done": 3,
+    "total": 3,
+    "errors": 0,
+    "elapsed_s": 2.1,
+    "cached": 0
+  },
+  "summary": {
+    "model": "deepseek-v4-flash",
+    "judge_model": "deepseek-v4-flash",
+    "dataset": "simpleqa_verified.csv",
+    "num_questions": 3,
+    "expected_questions": 3,
+    "coverage": 1.0,
+    "num_incomplete": 0,
+    "num_failed": 0,
+    "temperature": 0.0,
+    "counts": {
+      "CORRECT": 2,
+      "INCORRECT": 1,
+      "NOT_ATTEMPTED": 0
+    },
+    "pass_at_1": 0.6667,
+    "pass_at_1_ci95": [
+      0.1332,
+      1.2001
+    ],
+    "accuracy_attempted": 0.6667,
+    "not_attempted_rate": 0.0,
+    "output_tokens_avg": 484.3,
+    "output_tokens_p50": 615,
+    "visible_tokens_avg": 45.0,
+    "reasoning_tokens_avg": 438.3,
+    "ttft_visible_p50_s": 4.25,
+    "ttft_visible_p90_s": 4.85,
+    "tpot_visible_p50_s": 0.0039,
+    "e2e_latency_p50_s": 4.35,
+    "e2e_latency_p90_s": 5.04,
+    "by_topic": {
+      "Geography": {
+        "n": 1,
+        "pass_at_1": 1.0
+      },
+      "Politics": {
+        "n": 1,
+        "pass_at_1": 0.0
+      },
+      "Sports": {
+        "n": 1,
+        "pass_at_1": 1.0
+      }
+    },
+    "by_answer_type": {
+      "Date": {
+        "n": 1,
+        "pass_at_1": 0.0
+      },
+      "Number": {
+        "n": 1,
+        "pass_at_1": 1.0
+      },
+      "Place": {
+        "n": 1,
+        "pass_at_1": 1.0
+      }
+    },
+    "thinking": "enabled",
+    "reasoning_effort": null,
+    "judge_thinking": "server_default",
+    "judge_reasoning_effort": null,
+    "_stopped": false
+  },
+  "progress": {
+    "stage": "完成",
+    "pct": 100.0,
+    "text": "已完成"
+  },
+  "logs": [
+    {
+      "t": "2026-10-12 09:01:58",
+      "msg": "[启动] 模型 deepseek-v4-flash 端点 https://api.deepseek.com/chat/completions"
+    },
+    {
+      "t": "2026-10-12 09:01:58",
+      "msg": "[加载] 数据集 simpleqa_verified.csv [simpleqa]"
+    },
+    {
+      "t": "2026-10-12 09:01:58",
+      "msg": "[加载] 完成 3 题，带图 0 题"
+    },
+    {
+      "t": "2026-10-12 09:01:58",
+      "msg": "[gen] 数据集 SimpleQA-Verified 总题数 3 含图 0 缓存有效 0 缓存截断 0 终态 0 待跑 3 并发 3 max_tokens 32768 思考 开启（强度 默认）"
+    },
+    {
+      "t": "2026-10-12 09:02:03",
+      "msg": "[gen] 完成 3 题，失败 0，耗时 0.1 分钟，288.3 tps"
+    },
+    {
+      "t": "2026-10-12 09:02:03",
+      "msg": "[gen] 有效 3/3 截断 0 失败 0"
+    },
+    {
+      "t": "2026-10-12 09:02:03",
+      "msg": "[judge] 模型 deepseek-v4-flash 缓存 0 待判 3 并发 3 思考 服务端默认"
+    },
+    {
+      "t": "2026-10-12 09:02:06",
+      "msg": "[judge] 完成 3 题，失败 0，耗时 0.0 分钟"
+    },
+    {
+      "t": "2026-10-12 09:02:06",
+      "msg": "[结束] 状态 succeeded 耗时 0.1 分钟"
+    }
+  ]
+}

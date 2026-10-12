@@ -10,7 +10,8 @@
 接口:
   GET  /api/runs/<id>/status    进度快照
   GET  /api/runs/<id>/items     逐题结果 JSON
-  GET  /runs/<id>/download.csv  下载 CSV
+  GET  /runs/<id>/download.csv  下载 CSV（同时接受 HEAD 探测）
+  GET  /runs/<id>/download.json 下载汇总 JSON（同时接受 HEAD）
   POST /api/runs/<id>/stop      停止任务
   POST /runs/<id>/delete        删除任务
 """
@@ -48,6 +49,14 @@ STATUS_TEXT = {
     "interrupted": "已中断",
 }
 
+# 思考开关的三态取值（"" = 不传字段，交给服务端默认），标签仅供模板渲染
+THINKING_LABELS = {"": "服务端默认（不传该字段）", "enabled": "开启思考",
+                   "disabled": "关闭思考"}
+EFFORT_LABELS = {"": "默认（不传）", "low": "low", "medium": "medium",
+                 "high": "high", "max": "max"}
+THINKING_OPTIONS = [(v, THINKING_LABELS[v]) for v in eval_core.THINKING_CHOICES]
+EFFORT_OPTIONS = [(v, EFFORT_LABELS[v]) for v in eval_core.EFFORT_CHOICES]
+
 
 def defaults():
     return {
@@ -56,6 +65,10 @@ def defaults():
         "model": "GLM-5.2-zhipu",
         "judge_model": "DeepSeek-V4-Flash-0731",
         "data": eval_core.DEFAULT_DATA,
+        "thinking": "",
+        "reasoning_effort": "",
+        "judge_thinking": "",
+        "judge_reasoning_effort": "",
         "concurrency": 8,
         "judge_concurrency": 8,
         "limit": 0,
@@ -89,6 +102,8 @@ def index(request: Request):
         "runs": runs,
         "datasets": datasets,
         "data_exists": any(d["exists"] for d in datasets),
+        "thinking_options": THINKING_OPTIONS,
+        "effort_options": EFFORT_OPTIONS,
     })
 
 
@@ -100,6 +115,10 @@ def start(
     judge_model: str = Form(...),
     data: str = Form(eval_core.DEFAULT_DATA),
     data_custom: str = Form(""),
+    thinking: str = Form(""),
+    reasoning_effort: str = Form(""),
+    judge_thinking: str = Form(""),
+    judge_reasoning_effort: str = Form(""),
     concurrency: int = Form(8),
     judge_concurrency: int = Form(8),
     limit: int = Form(0),
@@ -117,10 +136,21 @@ def start(
         raise HTTPException(400, f"数据集不存在: {data}")
     if max_tokens_cap < max_tokens:
         max_tokens_cap = max_tokens
+    for label, value in (("思考模式", thinking), ("裁判思考模式", judge_thinking)):
+        if value not in eval_core.THINKING_CHOICES:
+            raise HTTPException(400, f"{label}取值非法: {value}")
+    for label, value in (("思考强度", reasoning_effort),
+                         ("裁判思考强度", judge_reasoning_effort)):
+        if value not in eval_core.EFFORT_CHOICES:
+            raise HTTPException(400, f"{label}取值非法: {value}")
     cfg = {
         "endpoint": endpoint.strip(), "api_key": api_key.strip(),
         "model": model.strip(), "judge_model": judge_model.strip(),
-        "data": data.strip(), "concurrency": max(1, concurrency),
+        "data": data.strip(),
+        "thinking": thinking, "reasoning_effort": reasoning_effort,
+        "judge_thinking": judge_thinking,
+        "judge_reasoning_effort": judge_reasoning_effort,
+        "concurrency": max(1, concurrency),
         "judge_concurrency": max(1, judge_concurrency),
         "limit": max(0, limit), "seed": seed,
         "max_tokens": max_tokens, "max_tokens_cap": max_tokens_cap,
@@ -140,6 +170,11 @@ def run_page(request: Request, run_id: str):
         pred = it.get("prediction") or ""
         it["prediction_short"] = pred[:300]
     snap["status_text"] = STATUS_TEXT.get(snap.get("status"), snap.get("status"))
+    cfg = snap.get("cfg") or {}
+    snap["thinking_text"] = eval_core.thinking_label(
+        cfg.get("thinking"), cfg.get("reasoning_effort"))
+    snap["judge_thinking_text"] = eval_core.thinking_label(
+        cfg.get("judge_thinking"), cfg.get("judge_reasoning_effort"))
     return templates.TemplateResponse(request, "run.html", {
         "run": snap, "items": items,
         "total_items": len(manager.read_items(run_id)) if items else 0,
@@ -186,7 +221,7 @@ def delete_run(run_id: str):
     return RedirectResponse("/", status_code=303)
 
 
-@app.get("/runs/{run_id}/download.csv")
+@app.api_route("/runs/{run_id}/download.csv", methods=["GET", "HEAD"])
 def download_csv(run_id: str):
     if not manager.get(run_id):
         raise HTTPException(404, "任务不存在")
@@ -197,7 +232,7 @@ def download_csv(run_id: str):
                         filename=f"simpleqa_{run_id}.csv")
 
 
-@app.get("/runs/{run_id}/download.json")
+@app.api_route("/runs/{run_id}/download.json", methods=["GET", "HEAD"])
 def download_json(run_id: str):
     snap = manager.get(run_id)
     if not snap:

@@ -12,7 +12,9 @@
     <a class="back" href="/">←</a>
     <div>
       <h1 class="mono">{{ run.run_id }}</h1>
-      <p class="sub">{{ run.cfg.model }} · 裁判 {{ run.cfg.judge_model }}{% if run.cfg.data %} · {{ run.cfg.data }}{% endif %}</p>
+      <p class="sub">{{ run.cfg.model }}（思考 {{ run.thinking_text }}）
+        · 裁判 {{ run.cfg.judge_model }}（思考 {{ run.judge_thinking_text }}）
+        {% if run.cfg.data %}· {{ run.cfg.data }}{% endif %}</p>
     </div>
   </div>
   <div class="head-actions">

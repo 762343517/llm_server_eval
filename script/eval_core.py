@@ -368,15 +368,47 @@ def summarise(records, model, judge_model, data, total_questions,
     return summary
 
 
+# ---------------------------------------------------------------- 思考开关
+# 三态："" 表示不传该字段（由服务端默认决定），其余为显式开关。
+THINKING_CHOICES = ("", "enabled", "disabled")
+EFFORT_CHOICES = ("", "low", "medium", "high", "max")
+
+
+def build_think_extra(thinking, reasoning_effort=""):
+    """把思考开关/强度转成请求体附加字段。
+
+    沿用 simpleqa_verified_deepseekv4.py 里验证过的约定：
+    {"thinking": {"type": "enabled"|"disabled"}, "reasoning_effort": "low|medium|high|max"}。
+    thinking 为空时不注入任何字段，保持服务端默认行为。
+    """
+    extra = {}
+    if thinking:
+        extra["thinking"] = {"type": thinking}
+    if thinking == "enabled" and reasoning_effort:
+        extra["reasoning_effort"] = reasoning_effort
+    return extra
+
+
+def thinking_label(thinking, reasoning_effort=""):
+    """人类可读的思考配置描述，用于日志与汇总。"""
+    if not thinking:
+        return "服务端默认"
+    if thinking == "disabled":
+        return "关闭"
+    return "开启（强度 {}）".format(reasoning_effort or "默认")
+
+
 # ---------------------------------------------------------------- HTTP 客户端
 class HttpClient:
     """按 endpoint/api_key 参数化的流式 + 非流式调用封装。"""
 
-    def __init__(self, endpoint, api_key, timeout=1800, should_stop=None):
+    def __init__(self, endpoint, api_key, timeout=1800, should_stop=None,
+                 extra=None):
         self.endpoint = endpoint
         self.api_key = api_key
         self.timeout = timeout
         self.should_stop = should_stop or (lambda: False)
+        self.extra = dict(extra or {})
         self._local = threading.local()
 
     def _session(self):
@@ -416,6 +448,7 @@ class HttpClient:
             "temperature": temperature,
             "stream": True,
             "stream_options": {"include_usage": True},
+            **self.extra,
         }
         t0 = time.perf_counter()
         ttft = None
@@ -508,8 +541,16 @@ def run_eval(cfg, on_event=None, should_stop=None):
     max_tokens = int(cfg.get("max_tokens", 32768))
     max_tokens_cap = int(cfg.get("max_tokens_cap", 65536))
     max_incomplete_attempts = int(cfg.get("max_incomplete_attempts", 2))
+    thinking = str(cfg.get("thinking") or "")
+    reasoning_effort = str(cfg.get("reasoning_effort") or "")
+    judge_thinking = str(cfg.get("judge_thinking") or "")
+    judge_reasoning_effort = str(cfg.get("judge_reasoning_effort") or "")
 
-    client = HttpClient(cfg["endpoint"], cfg["api_key"], should_stop=should_stop)
+    client = HttpClient(cfg["endpoint"], cfg["api_key"], should_stop=should_stop,
+                        extra=build_think_extra(thinking, reasoning_effort))
+    judge_client = HttpClient(
+        cfg["endpoint"], cfg["api_key"], should_stop=should_stop,
+        extra=build_think_extra(judge_thinking, judge_reasoning_effort))
 
     df, images = load_dataset(data, limit=limit, seed=seed, on_event=on_event)
 
@@ -531,6 +572,7 @@ def run_eval(cfg, on_event=None, should_stop=None):
         "todo": len(todo), "concurrency": concurrency, "max_tokens": max_tokens,
         "dataset": os.path.dirname(data).rstrip("/").split("/")[-1] or data,
         "images": len(images),
+        "thinking": thinking_label(thinking, reasoning_effort),
     })
 
     def gen(row):
@@ -650,10 +692,11 @@ def run_eval(cfg, on_event=None, should_stop=None):
     on_event("judge_start", {
         "model": judge_model, "cached": len(judged), "todo": len(to_judge),
         "concurrency": judge_concurrency,
+        "thinking": thinking_label(judge_thinking, judge_reasoning_effort),
     })
 
     def judge(rec):
-        out_text = client.chat_json(
+        out_text = judge_client.chat_json(
             judge_model,
             GRADER_TEMPLATE.format(
                 question=rec["problem"],
@@ -733,6 +776,12 @@ def run_eval(cfg, on_event=None, should_stop=None):
 
     summary = summarise(records, model, judge_model, data, len(df),
                         incomplete_n, failed_n)
+    summary.update({
+        "thinking": thinking or "server_default",
+        "reasoning_effort": reasoning_effort or None,
+        "judge_thinking": judge_thinking or "server_default",
+        "judge_reasoning_effort": judge_reasoning_effort or None,
+    })
     with open(out + ".json", "w") as f:
         json.dump(summary, f, ensure_ascii=False, indent=2)
     with open(out + ".items.jsonl", "w") as f:

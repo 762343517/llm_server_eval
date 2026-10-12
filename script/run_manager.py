@@ -97,10 +97,11 @@ class RunState:
                     "max_tokens": p["max_tokens"],
                 })
                 self.log("[gen] 数据集 {} 总题数 {} 含图 {} 缓存有效 {} 缓存截断 {} "
-                         "终态 {} 待跑 {} 并发 {} max_tokens {}".format(
+                         "终态 {} 待跑 {} 并发 {} max_tokens {} 思考 {}".format(
                              p.get("dataset", "-"), p["total"], p.get("images", 0),
                              p["cached_valid"], p["cached_incomplete"], p["stuck"],
-                             p["todo"], p["concurrency"], p["max_tokens"]))
+                             p["todo"], p["concurrency"], p["max_tokens"],
+                             p.get("thinking", "-")))
             elif kind == "gen_progress":
                 self.gen.update(p)
             elif kind == "truncated":
@@ -118,8 +119,9 @@ class RunState:
             elif kind == "judge_start":
                 self.phase = "judge"
                 self.judge.update({"total": p["todo"], "cached": p["cached"]})
-                self.log("[judge] 模型 {} 缓存 {} 待判 {} 并发 {}".format(
-                    p["model"], p["cached"], p["todo"], p["concurrency"]))
+                self.log("[judge] 模型 {} 缓存 {} 待判 {} 并发 {} 思考 {}".format(
+                    p["model"], p["cached"], p["todo"], p["concurrency"],
+                    p.get("thinking", "-")))
             elif kind == "judge_progress":
                 self.judge.update(p)
             elif kind == "judge_end":
@@ -263,7 +265,7 @@ class RunManager:
         if os.path.exists(path):
             try:
                 with open(path) as f:
-                    return _mark_interrupted(json.load(f))
+                    return _mark_interrupted(json.load(f), path)
             except Exception:  # noqa: BLE001
                 return None
         return None
@@ -285,7 +287,7 @@ class RunManager:
                 if os.path.exists(path):
                     try:
                         with open(path) as f:
-                            items[rid] = _mark_interrupted(json.load(f))
+                            items[rid] = _mark_interrupted(json.load(f), path)
                     except Exception:  # noqa: BLE001
                         continue
         out = sorted(items.values(), key=lambda x: x.get("started_at", 0),
@@ -333,6 +335,40 @@ class RunManager:
         shutil.rmtree(os.path.join(self.runs_dir, run_id), ignore_errors=True)
         self._states.pop(run_id, None)
         return True
+
+
+def _mark_interrupted(snap, path=None):
+    """磁盘快照仍停留在 running，说明该任务所属进程已退出，标记为「已中断」。
+
+    真实的中断时刻无法得知，用 meta.json 的最后写入时间（即最后一次落盘）近似，
+    这样任务列表反复刷新时耗时不会一直增长。仅在 status 为 running 时改写，
+    已完成/失败/已停止的任务原样返回。
+    """
+    if snap.get("status") != "running":
+        return snap
+    snap["status"] = "interrupted"
+    started = snap.get("started_at") or 0
+    ended = None
+    if path:
+        try:
+            ended = os.path.getmtime(path)
+        except OSError:
+            ended = None
+    if not ended or ended < started:
+        ended = None
+    snap["finished_at"] = ended
+    snap["finished_at_str"] = (
+        time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ended))
+        if ended else None)
+    if ended:
+        snap["duration_s"] = round(ended - started, 1)
+    if isinstance(snap.get("logs"), list):
+        snap["logs"].append({
+            "t": time.strftime("%Y-%m-%d %H:%M:%S",
+                               time.localtime(ended or time.time())),
+            "msg": "[中断] 服务重启或进程退出，任务未能跑完",
+        })
+    return snap
 
 
 def _cell(v):
