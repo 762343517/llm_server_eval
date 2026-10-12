@@ -137,6 +137,26 @@ td.wide { max-width: 320px; }
   white-space: nowrap;
 }
 
+/* ---------------------------------------------------------- CSV 表格查看 */
+.dataset-actions {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+}
+.table-wrap.csv { max-height: 68vh; }
+.table-wrap.csv table { font-size: 12.5px; }
+.table-wrap.csv thead th { z-index: 3; }
+.table-wrap.csv th.rowno, .table-wrap.csv td.rowno {
+  position: sticky; left: 0; z-index: 2; width: 54px;
+  background: #fff; color: var(--muted); text-align: right;
+  border-right: 1px solid var(--line); white-space: nowrap;
+}
+.table-wrap.csv thead th.rowno { background: #f7f9fc; }
+.table-wrap.csv tbody tr:hover td.rowno { background: #fafbff; }
+.csv-cell {
+  display: block; max-width: 340px; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap;
+}
+th.num, td.num { text-align: right; font-variant-numeric: tabular-nums; }
+
 /* ---------------------------------------------------------- 徽章/进度 */
 .badge {
   display: inline-block; padding: 3px 10px; border-radius: 999px;

@@ -6,18 +6,22 @@
 页面:
   /                  配置表单 + 历史任务列表（SSR）
   /runs/<id>         任务详情：进度、指标、逐题结果（SSR + 轮询增量刷新）
+  /csv?path=<p>      把工作区内的 CSV 文件渲染成 HTML 表格
 
 接口:
   GET  /api/runs/<id>/status    进度快照
   GET  /api/runs/<id>/items     逐题结果 JSON
   GET  /runs/<id>/download.csv  下载 CSV（同时接受 HEAD 探测）
   GET  /runs/<id>/download.json 下载汇总 JSON（同时接受 HEAD）
+  GET  /runs/<id>/view.csv      以表格形式查看任务结果 CSV
   POST /api/runs/<id>/stop      停止任务
   POST /runs/<id>/delete        删除任务
 """
 import argparse
+import csv
 import os
 import sys
+from urllib.parse import quote as urlquote
 
 from fastapi import FastAPI, Form, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
@@ -25,6 +29,11 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+# CSV 预览只允许读取工作区内的文件，防止路径穿越
+WORKSPACE_ROOT = os.path.realpath(os.path.join(BASE_DIR, os.pardir))
+# 单次渲染行数上限（预览用，超出部分提示下载）
+CSV_DEFAULT_LIMIT = 500
+CSV_MAX_LIMIT = 5000
 sys.path.insert(0, BASE_DIR)
 
 import eval_core  # noqa: E402
@@ -79,6 +88,104 @@ def defaults():
     }
 
 
+def _resolve_path(raw):
+    """把用户传入的路径限制在工作区内，返回真实绝对路径。"""
+    raw = (raw or "").strip()
+    if not raw:
+        raise HTTPException(400, "缺少文件路径")
+    target = raw if os.path.isabs(raw) else os.path.join(WORKSPACE_ROOT, raw)
+    real = os.path.realpath(target)
+    if real != WORKSPACE_ROOT and not real.startswith(WORKSPACE_ROOT + os.sep):
+        raise HTTPException(403, "只允许查看工作区内的文件")
+    if not os.path.isfile(real):
+        raise HTTPException(404, "文件不存在: " + raw)
+    return real
+
+
+def _read_csv(path, limit):
+    """读取 CSV 表头与前 limit 行，返回 (header, rows, total, encoding)。
+
+    编码依次尝试 utf-8-sig / gbk / latin-1；分隔符由 Sniffer 嗅探，失败回退逗号。
+    total 是文件的数据行总数，用于提示"仅展示前 N 行"。
+    """
+    err = None
+    for enc in ("utf-8-sig", "gbk", "latin-1"):
+        try:
+            with open(path, "r", newline="", encoding=enc) as f:
+                sample = f.read(8192)
+                f.seek(0)
+                try:
+                    dialect = csv.Sniffer().sniff(sample, delimiters=",;\t|")
+                except csv.Error:
+                    dialect = csv.excel
+                reader = csv.reader(f, dialect)
+                header = next(reader, None)
+                if header is None:
+                    return [], [], 0, enc
+                rows, total = [], 0
+                for row in reader:
+                    total += 1
+                    if len(rows) < limit:
+                        rows.append(row)
+            return header, rows, total, enc
+        except UnicodeDecodeError as e:  # 换编码重试
+            err = e
+    raise HTTPException(400, "无法解码 CSV 文件: {}".format(err))
+
+
+def _numeric_columns(header, rows, sample=200):
+    """逐列判断是否全为数字，供模板右对齐（题号 / token / 耗时等）。"""
+    flags = []
+    for i in range(len(header)):
+        vals = [str(r[i]).strip() for r in rows[:sample]
+                if i < len(r) and str(r[i]).strip()]
+        ok = bool(vals)
+        for v in vals:
+            try:
+                float(v.replace(",", ""))
+            except ValueError:
+                ok = False
+                break
+        flags.append(ok)
+    return flags
+
+
+def _csv_context(path, limit, title="", back_url="/", download_url=""):
+    """组装 CSV 表格页所需的全部模板变量。"""
+    limit = max(1, min(int(limit or CSV_DEFAULT_LIMIT), CSV_MAX_LIMIT))
+    header, rows, total, enc = _read_csv(path, limit)
+    width = max([len(header)] + [len(r) for r in rows]) if header else 0
+    header = (header + [""] * width)[:width]
+    rows = [(r + [""] * width)[:width] for r in rows]
+    return {
+        "title": title or os.path.basename(path),
+        "path": os.path.relpath(path, WORKSPACE_ROOT),
+        "header": header,
+        "rows": rows,
+        "numeric": _numeric_columns(header, rows),
+        "total": total,
+        "shown": len(rows),
+        "width": width,
+        "encoding": enc,
+        "limit": limit,
+        "max_limit": CSV_MAX_LIMIT,
+        "back_url": back_url,
+        "download_url": download_url,
+        "error": None,
+    }
+
+
+def _csv_error(request, path, title, detail, back_url, download_url, status=404):
+    return templates.TemplateResponse(request, "csv.html", {
+        "title": title or path or "CSV",
+        "path": path, "header": [], "rows": [], "numeric": [],
+        "total": 0, "shown": 0, "width": 0, "encoding": "",
+        "limit": CSV_DEFAULT_LIMIT, "max_limit": CSV_MAX_LIMIT,
+        "back_url": back_url, "download_url": download_url,
+        "error": detail,
+    }, status_code=status)
+
+
 def _decorate(runs):
     for r in runs:
         r["status_text"] = STATUS_TEXT.get(r.get("status"), r.get("status"))
@@ -97,6 +204,8 @@ def _decorate(runs):
 def index(request: Request):
     runs = _decorate(manager.list_runs())
     datasets = eval_core.available_datasets()
+    for d in datasets:
+        d["is_csv"] = d["path"].lower().endswith(".csv")
     return templates.TemplateResponse(request, "index.html", {
         "defaults": defaults(),
         "runs": runs,
@@ -179,6 +288,44 @@ def run_page(request: Request, run_id: str):
         "run": snap, "items": items,
         "total_items": len(manager.read_items(run_id)) if items else 0,
     })
+
+
+@app.get("/runs/{run_id}/view.csv")
+def run_csv_view(request: Request, run_id: str, limit: int = CSV_DEFAULT_LIMIT):
+    """把任务结果 CSV（导出用的同一份文件）渲染成 HTML 表格。"""
+    if not manager.get(run_id):
+        raise HTTPException(404, "任务不存在")
+    back_url = "/runs/" + run_id
+    download_url = "/runs/{}/download.csv".format(run_id)
+    title = "{} 结果 CSV".format(run_id)
+    path, _ = manager.export_csv(run_id)
+    if not path:
+        return _csv_error(request, "", title, "该任务暂无可导出的结果（逐题记录为空）。",
+                          back_url, download_url)
+    try:
+        ctx = _csv_context(path, limit, title, back_url, download_url)
+    except HTTPException as e:
+        return _csv_error(request, path, title, e.detail, back_url, download_url,
+                          status=e.status_code)
+    return templates.TemplateResponse(request, "csv.html", ctx)
+
+
+@app.get("/csv")
+def csv_view(request: Request, path: str = "", limit: int = CSV_DEFAULT_LIMIT,
+             download: int = 0, back: str = "", title: str = ""):
+    """查看工作区内任意 CSV：默认渲染表格，download=1 时直接下载原文件。"""
+    real = _resolve_path(path)
+    if download:
+        return FileResponse(real, media_type="text/csv",
+                            filename=os.path.basename(real))
+    back_url = back or "/"
+    download_url = "/csv?path={}&download=1".format(urlquote(path.strip()))
+    try:
+        ctx = _csv_context(real, limit, title, back_url, download_url)
+    except HTTPException as e:
+        return _csv_error(request, path, title, e.detail, back_url, download_url,
+                          status=e.status_code)
+    return templates.TemplateResponse(request, "csv.html", ctx)
 
 
 # ---------------------------------------------------------------- 接口

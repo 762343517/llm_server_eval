@@ -19,6 +19,7 @@
   </div>
   <div class="head-actions">
     <span class="badge {{ run.status }}" id="status-badge">{{ run.status_text }}</span>
+    <a class="btn ghost" href="/runs/{{ run.run_id }}/view.csv">查看 CSV 表格</a>
     <a class="btn ghost" href="/runs/{{ run.run_id }}/download.csv">下载 CSV</a>
     <a class="btn ghost" href="/runs/{{ run.run_id }}/download.json">下载 JSON</a>
     {% if run.status == 'running' %}

@@ -97,6 +97,18 @@
         </select>
       </label>
 
+      <div class="span-2 dataset-actions">
+        <span class="hint">以表格预览 CSV 数据集：</span>
+        {% set csvsets = datasets | selectattr('is_csv') | selectattr('exists') | list %}
+        {% if csvsets %}
+          {% for d in csvsets %}
+          <a class="btn tiny ghost" href="/csv?path={{ d.path | urlencode }}&back=/">{{ d.name }}</a>
+          {% endfor %}
+        {% else %}
+          <span class="hint">当前数据集均非 CSV 格式，无可预览文件</span>
+        {% endif %}
+      </div>
+
       <label class="span-2">
         <span>自定义数据集路径 <em>可选；填写后覆盖上方选择</em></span>
         <input type="text" name="data_custom" value="" autocomplete="off"
@@ -188,6 +200,7 @@
             <td class="nowrap">{{ r.started_at_str }}</td>
             <td class="nowrap">
               <a class="btn tiny" href="/runs/{{ r.run_id }}">查看</a>
+              <a class="btn tiny ghost" href="/runs/{{ r.run_id }}/view.csv">表格</a>
               <a class="btn tiny ghost" href="/runs/{{ r.run_id }}/download.csv">CSV</a>
               <form method="post" action="/runs/{{ r.run_id }}/delete" class="inline"
                     onsubmit="return confirm('确认删除该任务及其结果文件？');">
