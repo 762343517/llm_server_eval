@@ -7,6 +7,8 @@ import collections
 import csv
 import json
 import os
+import re
+import shutil
 import threading
 import time
 from datetime import datetime, timedelta, timezone
@@ -14,6 +16,9 @@ from datetime import datetime, timedelta, timezone
 import eval_core
 
 RUNS_DIR = os.environ.get("RUNS_DIR", "runs")
+
+# run_id 直接参与拼路径（删除时会 rmtree），必须挡住 ".." 之类的越权名字
+_RUN_ID_RE = re.compile(r"^[0-9A-Za-z][0-9A-Za-z._-]{0,63}$")
 
 TIME_FMT = "%Y-%m-%d %H:%M:%S"
 
@@ -95,6 +100,10 @@ class RunState:
         self.error = None
         self.started_at = time.time()
         self.finished_at = None
+        # 删除标记：置位后 save() 不再落盘，避免把已删除的目录写回来
+        self.deleted = False
+        # load 在 load_start 事件里才赋值，提前初始化，避免早期失败的 run 让快照抛错
+        self.load = {"loaded": 0, "total": 0, "images": 0}
         self.gen = {"done": 0, "total": 0, "errors": 0, "tokens": 0,
                     "elapsed_s": 0.0, "tps": 0.0, "cached_valid": 0,
                     "cached_incomplete": 0, "stuck": 0, "todo": 0,
@@ -219,13 +228,21 @@ class RunState:
         return {"stage": "准备中", "pct": 0.0, "text": ""}
 
     def save(self):
+        """把快照写入 meta.json；已删除的任务直接跳过。
+
+        整个写盘过程持锁，与 delete() 的删除动作互斥：否则删除瞬间在飞的
+        save() 能把 meta.json 重新写回来，任务就会在列表里「复活」。
+        """
         try:
-            os.makedirs(self.dir, exist_ok=True)
-            tmp = self.meta_path + ".tmp"
-            with open(tmp, "w") as f:
-                json.dump(self.snapshot(include_logs=True), f,
-                          ensure_ascii=False, indent=2)
-            os.replace(tmp, self.meta_path)
+            with self.lock:
+                if self.deleted:
+                    return
+                os.makedirs(self.dir, exist_ok=True)
+                tmp = self.meta_path + ".tmp"
+                with open(tmp, "w") as f:
+                    json.dump(self.snapshot(include_logs=True), f,
+                              ensure_ascii=False, indent=2)
+                os.replace(tmp, self.meta_path)
         except Exception:  # noqa: BLE001
             pass
 
@@ -313,6 +330,8 @@ class RunManager:
         items = {}
         with self._lock:
             for rid, st in self._states.items():
+                if st.deleted:
+                    continue
                 items[rid] = st.snapshot(include_logs=False)
         if os.path.isdir(self.runs_dir):
             for rid in os.listdir(self.runs_dir):
@@ -365,9 +384,25 @@ class RunManager:
         return dest, len(rows)
 
     def delete(self, run_id):
-        import shutil
-        shutil.rmtree(os.path.join(self.runs_dir, run_id), ignore_errors=True)
-        self._states.pop(run_id, None)
+        """删除任务目录并移出内存；返回是否确实删掉了东西。
+
+        运行中的任务被删除后 worker 仍在跑，因此这里同时置 deleted 标记并触发
+        stop_event：既让 save() 不再把 meta.json 写回来，也让它尽快停下。
+        """
+        if not _RUN_ID_RE.match(run_id or ""):
+            return False
+        with self._lock:
+            st = self._states.pop(run_id, None)
+        target = os.path.join(self.runs_dir, run_id)
+        if st is None:
+            existed = os.path.isdir(target)
+            shutil.rmtree(target, ignore_errors=True)
+            return existed
+        with st.lock:                       # 与 save() 互斥，杜绝「复活」
+            st.deleted = True
+            st.stop_event.set()
+            shutil.rmtree(target, ignore_errors=True)
+        st.log("[删除] 任务已删除，结果文件已清理")
         return True
 
 

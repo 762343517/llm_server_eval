@@ -439,8 +439,19 @@ def api_stop(run_id: str):
 
 
 @app.post("/runs/{run_id}/delete")
-def delete_run(run_id: str):
-    manager.delete(run_id)
+def delete_run(request: Request, run_id: str):
+    """删除任务。
+
+    页面上的删除按钮走 fetch（Accept: application/json），返回 JSON 由前端就地
+    移除该行；无 JS 时退回表单提交 + 303 重定向的老路径。
+    """
+    ok = manager.delete(run_id)
+    if "application/json" in (request.headers.get("accept") or ""):
+        if not ok:
+            raise HTTPException(404, "任务不存在")
+        return JSONResponse({"ok": True, "run_id": run_id})
+    if not ok:
+        raise HTTPException(404, "任务不存在")
     return RedirectResponse("/", status_code=303)
 
 

@@ -184,12 +184,12 @@
   <section class="card">
     <div class="card-head">
       <h2>任务列表</h2>
-      <span class="hint">共 {{ runs | length }} 个任务</span>
+      <span class="hint" id="runs-count">共 {{ runs | length }} 个任务</span>
     </div>
 
     {% if runs %}
-    <div class="table-wrap">
-      <table>
+    <div class="table-wrap" id="runs-table-wrap">
+      <table id="runs-table">
         <thead>
           <tr>
             <th>任务</th><th>模型</th><th>状态</th><th>进度</th>
@@ -198,7 +198,7 @@
         </thead>
         <tbody>
         {% for r in runs %}
-          <tr>
+          <tr data-run-id="{{ r.run_id }}">
             <td>
               <a class="mono" href="/runs/{{ r.run_id }}">{{ r.run_id }}</a>
               {% if r.cfg.data %}<br><small class="muted">{{ r.cfg.data.split('/')[-1] }}</small>{% endif %}
@@ -226,8 +226,8 @@
               <a class="btn tiny" href="/runs/{{ r.run_id }}">查看</a>
               <a class="btn tiny ghost" href="/runs/{{ r.run_id }}/view.csv">表格</a>
               <a class="btn tiny ghost" href="/runs/{{ r.run_id }}/download.csv">CSV</a>
-              <form method="post" action="/runs/{{ r.run_id }}/delete" class="inline"
-                    onsubmit="return confirm('确认删除该任务及其结果文件？');">
+              <form method="post" action="/runs/{{ r.run_id }}/delete" class="inline js-delete-run"
+                    data-run-id="{{ r.run_id }}">
                 <button class="btn tiny danger" type="submit">删除</button>
               </form>
             </td>
@@ -236,6 +236,7 @@
         </tbody>
       </table>
     </div>
+    <p class="empty" id="runs-empty" hidden>还没有任务，填写上方配置后点击「启动评测」。</p>
     {% else %}
     <p class="empty">还没有任务，填写上方配置后点击「启动评测」。</p>
     {% endif %}
