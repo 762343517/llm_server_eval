@@ -9,11 +9,14 @@ CLI (simpleqa_eval.py) 与 Web 服务 (webapp.py) 共用同一套实现，
 两者统一为同一套字段，题型判定与打分模板完全复用。
 """
 import json
+import logging
 import os
 import random
+import sys
 import threading
 import time
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from datetime import datetime, timedelta, timezone
 
 import pandas as pd
 import requests
@@ -398,6 +401,82 @@ def thinking_label(thinking, reasoning_effort=""):
     return "开启（强度 {}）".format(reasoning_effort or "默认")
 
 
+# ---------------------------------------------------------------- 请求日志
+# 每次调用 LLM 都按行记录实际请求参数，便于排查各厂商字段/取值差异；
+# 提示词正文、图片 data-url、API Key 一律不落日志，只保留长度摘要。
+# ZHIPU_EVAL_LOG_REQ=0 可整体关闭。
+_LOG_REQ = (os.environ.get("ZHIPU_EVAL_LOG_REQ") or "1").strip().lower() not in (
+    "0", "false", "no", "off")
+
+_TZ_LOCAL_NAMES = ("", "local", "system", "localtime")
+_TZ_PLUS8_NAMES = ("asia/shanghai", "asia/chongqing", "asia/harbin", "asia/urumqi",
+                   "prc")
+
+
+def _display_tz():
+    """日志时间按展示时区渲染（默认东八区），避免容器 UTC 环境差 8 小时。"""
+    name = (os.environ.get("ZHIPU_EVAL_TZ") or "Asia/Shanghai").strip()
+    if name.lower() in _TZ_LOCAL_NAMES:
+        return None
+    try:
+        from zoneinfo import ZoneInfo
+
+        return ZoneInfo(name)
+    except Exception:  # noqa: BLE001 镜像缺 tzdata 时东八区退回固定 +08:00
+        return timezone(timedelta(hours=8)) if name.lower() in _TZ_PLUS8_NAMES else None
+
+
+class _TZFormatter(logging.Formatter):
+    def __init__(self):
+        super().__init__("%(asctime)s [%(levelname)s] %(message)s")
+        self._tz = _display_tz()
+
+    def formatTime(self, record, datefmt=None):
+        dt = (datetime.fromtimestamp(record.created) if self._tz is None
+              else datetime.fromtimestamp(record.created, self._tz))
+        return dt.strftime(datefmt or "%Y-%m-%d %H:%M:%S")
+
+
+logger = logging.getLogger("zhipu_eval")
+if not logger.handlers:  # 自带 stderr handler，保证 INFO 在 uvicorn/CLI 下都可见
+    _handler = logging.StreamHandler(sys.stderr)
+    _handler.setFormatter(_TZFormatter())
+    logger.addHandler(_handler)
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+
+
+def _brief(content):
+    """请求日志里不落提示词正文，只留长度/形态摘要。"""
+    if isinstance(content, str):
+        return "<prompt omitted: {} chars>".format(len(content))
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            kind = (item or {}).get("type")
+            if kind == "text":
+                text = item.get("text") or ""
+                parts.append({"type": "text",
+                              "text": "<prompt omitted: {} chars>".format(len(text))})
+            elif kind == "image_url":
+                raw = item.get("image_url")
+                url = raw.get("url", "") if isinstance(raw, dict) else (raw or "")
+                parts.append({"type": "image_url",
+                              "image_url": "<image omitted: {} chars>".format(len(url))})
+            else:
+                parts.append({"type": kind or "unknown"})
+        return parts
+    return "<empty>"
+
+
+def redact_payload(payload):
+    """复制请求体，仅把 messages 正文换成摘要，其余参数原样保留。"""
+    out = dict(payload)
+    out["messages"] = [dict(m, content=_brief(m.get("content")))
+                       for m in payload.get("messages") or []]
+    return out
+
+
 # ---------------------------------------------------------------- HTTP 客户端
 class HttpClient:
     """按 endpoint/api_key 参数化的流式 + 非流式调用封装。"""
@@ -440,7 +519,19 @@ class HttpClient:
             {"type": "image_url", "image_url": {"url": image}},
         ]
 
-    def _post_stream(self, model, prompt, max_tokens, temperature=0.0, image=None):
+    def _log_request(self, kind, payload, tag=""):
+        """记录一次实际发出的请求参数（提示词只记长度）。"""
+        if not _LOG_REQ:
+            return
+        try:
+            body = json.dumps(redact_payload(payload), ensure_ascii=False)
+        except Exception:  # noqa: BLE001 日志失败不影响调用
+            body = "<payload not serialisable>"
+        logger.info("[LLM请求]%s %s %s %s", " " + tag if tag else "", kind,
+                    self.endpoint, body)
+
+    def _post_stream(self, model, prompt, max_tokens, temperature=0.0, image=None,
+                     tag=""):
         payload = {
             "model": model,
             "messages": [{"role": "user", "content": self._content(prompt, image)}],
@@ -450,6 +541,7 @@ class HttpClient:
             "stream_options": {"include_usage": True},
             **self.extra,
         }
+        self._log_request("stream", payload, tag)
         t0 = time.perf_counter()
         ttft = None
         parts, usage, finish = [], {}, None
@@ -485,7 +577,8 @@ class HttpClient:
             if self.should_stop():
                 raise RuntimeError("stopped by user")
             try:
-                return self._post_stream(model, prompt, max_tokens, image=image)
+                return self._post_stream(model, prompt, max_tokens, image=image,
+                                         tag=tag)
             except Exception as e:  # noqa: BLE001
                 last = e
                 wait_s = self.backoff(k, getattr(e, "status", None))
@@ -494,13 +587,15 @@ class HttpClient:
                 time.sleep(wait_s)
         raise RuntimeError(f"stream failed after {retries}: {last} {tag}")
 
-    def chat_json(self, model, prompt, max_tokens=2048, retries=8, temperature=0.0):
+    def chat_json(self, model, prompt, max_tokens=2048, retries=8, temperature=0.0,
+                  tag=""):
         payload = {
             "model": model,
             "messages": [{"role": "user", "content": prompt}],
             "max_tokens": max_tokens,
             "temperature": temperature,
         }
+        self._log_request("json", payload, tag)
         last = None
         for k in range(retries):
             if self.should_stop():
@@ -707,6 +802,7 @@ def run_eval(cfg, on_event=None, should_stop=None):
                 target=rec["answer"],
                 predicted_answer=rec["prediction"] or "(empty)",
             ),
+            tag="j{}".format(rec["original_index"]),
         )
         return {"original_index": rec["original_index"], "judge_output": out_text,
                 "grade": parse_grade(out_text)}

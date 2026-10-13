@@ -39,6 +39,20 @@ ZHIPU_EVAL_TZ=local python3 script/webapp.py --host 0.0.0.0 --port 8000  # 沿�
 
 历史任务无需迁移：起止时间由落盘 epoch 重新计算，日志时间按写入进程当时的偏移整体平移。
 
+## 请求日志
+
+每次调用 LLM（生成 + 裁判）都会往 stderr 打一行实际发出的请求参数，格式：
+
+```
+2026-10-13 16:18:48 [INFO] [LLM请求] q7 stream https://open.bigmodel.cn/api/paas/v4/chat/completions {"model": "GLM-5.2-zhipu", "messages": [{"role": "user", "content": "<prompt omitted: 66 chars>"}], "max_tokens": 32768, "temperature": 0.0, "stream": true, "stream_options": {"include_usage": true}, "thinking": {"type": "enabled"}, "reasoning_effort": "high"}
+```
+
+- 行首 `q7` / `j9` 是题号（生成 / 裁判），`stream` / `json` 表示流式与否；
+- 提示词正文、图片 data-url、API Key 都不落日志，只保留长度摘要；
+- 时间同样按 `ZHIPU_EVAL_TZ` 渲染；
+- Web 服务以 `nohup ... >> runs/logs/webapp.log 2>&1 &` 启动时，这些行会写进 `runs/logs/webapp.log`；
+- `ZHIPU_EVAL_LOG_REQ=0` 可关闭该日志（重试的每一次调用都会单独记一行）。
+
 ## 思考开关与强度
 被测模型与裁判模型各自独立控制，取值三态：**不传**（默认，交给服务端决定）、**开启**、**关闭**。
 开启时可再指定强度 `low|medium|high|max`（关闭或不传时不注入该字段）。
