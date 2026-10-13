@@ -509,6 +509,16 @@ class HttpClient:
             return min(1.0 + 0.7 * k, 15.0) + random.random()
         return min(1.5 + 0.8 * k, 25.0) + random.random()
 
+    # 402/408/425/429 仍属可重试：欠费限流、请求超时、过早请求、限速
+    RETRYABLE_4XX = (402, 408, 425, 429)
+
+    @classmethod
+    def is_fatal(cls, e):
+        """4xx 客户端错误（限流/超时类除外）为永久失败，重试无意义。"""
+        status = getattr(e, "status", None)
+        return (status is not None and 400 <= status < 500
+                and status not in cls.RETRYABLE_4XX)
+
     @staticmethod
     def _content(prompt, image=None):
         """带图题目走多模态消息体（data-url），纯文本题保持字符串以兼容旧服务。"""
@@ -581,6 +591,10 @@ class HttpClient:
                                          tag=tag)
             except Exception as e:  # noqa: BLE001
                 last = e
+                if self.is_fatal(e):
+                    raise RuntimeError(
+                        f"stream failed (fatal {getattr(e, 'status', None)}, "
+                        f"no retry): {e} {tag}") from e
                 wait_s = self.backoff(k, getattr(e, "status", None))
                 if on_retry:
                     on_retry(k, e, wait_s)
@@ -609,6 +623,10 @@ class HttpClient:
                 return r.json()["choices"][0]["message"]["content"] or ""
             except Exception as e:  # noqa: BLE001
                 last = e
+                if self.is_fatal(e):
+                    raise RuntimeError(
+                        f"chat failed (fatal {getattr(e, 'status', None)}, "
+                        f"no retry): {e}") from e
                 time.sleep(self.backoff(k, getattr(e, "status", None)))
         raise RuntimeError(f"chat failed after {retries}: {last}")
 
