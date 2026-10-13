@@ -113,13 +113,14 @@
   <section class="card">
     <div class="card-head">
       <h2>评测结果</h2>
-      <span class="hint">覆盖率 {{ '%.1f%%' | format(s.coverage * 100) }}（{{ s.num_questions }} / {{ s.expected_questions }} 题）</span>
+      <span class="hint">覆盖率 {{ '%.1f%%' | format(s.coverage * 100) }}（{{ s.num_records or s.num_questions }} / {{ s.expected_questions }} 题已判分，其中有效计分 {{ s.num_questions }} 题）</span>
     </div>
 
-    {% if s.coverage < 1 %}
+    {% if s.coverage < 1 or s.num_unscored %}
     <div class="alert warn">
-      有 {{ s.num_incomplete }} 题因思考超长被截断、{{ s.num_failed }} 题请求失败，
-      共 {{ s.expected_questions - s.num_questions }} 题未纳入统计。Pass@1 仅代表已完成部分。
+      有 {{ s.num_incomplete }} 题因思考超长被截断、{{ s.num_failed }} 题请求失败、
+      {{ s.num_unscored }} 题裁判未给出有效判定（空输出 {{ s.counts.JUDGE_EMPTY }} · 无法判断 {{ s.counts.JUDGE_INVALID }}），
+      共 {{ s.expected_questions - s.num_questions }} 题未纳入统计。Pass@1 仅按有效计分题目计算。
     </div>
     {% endif %}
 
@@ -128,6 +129,7 @@
         <label>Pass@1</label>
         <b>{{ '%.2f%%' | format(s.pass_at_1 * 100) }}</b>
         <small>95% CI {{ '%.2f%%' | format(s.pass_at_1_ci95[0] * 100) }} ~ {{ '%.2f%%' | format(s.pass_at_1_ci95[1] * 100) }}</small>
+        <small>分母 {{ s.num_questions }} 题</small>
       </div>
       <div class="kpi">
         <label>仅计作答</label>
@@ -137,6 +139,8 @@
       <div class="kpi ok"><label>Correct</label><b>{{ s.counts.CORRECT }}</b></div>
       <div class="kpi bad"><label>Incorrect</label><b>{{ s.counts.INCORRECT }}</b></div>
       <div class="kpi mute"><label>Not Attempted</label><b>{{ s.counts.NOT_ATTEMPTED }}</b></div>
+      <div class="kpi invalid"><label>裁判空输出</label><b>{{ s.counts.JUDGE_EMPTY or 0 }}</b><small>无效，不计入</small></div>
+      <div class="kpi invalid"><label>裁判无法判断</label><b>{{ s.counts.JUDGE_INVALID or 0 }}</b><small>无效，不计入</small></div>
     </div>
 
     <h3 class="sub-title">性能指标</h3>
@@ -190,9 +194,9 @@
         <input type="search" id="filter-input" placeholder="搜索问题或回答…">
         <select id="filter-grade">
           <option value="">全部判定</option>
-          <option value="CORRECT">Correct</option>
-          <option value="INCORRECT">Incorrect</option>
-          <option value="NOT_ATTEMPTED">Not Attempted</option>
+          {% for value, label in grade_options %}
+          <option value="{{ value }}">{{ label }}</option>
+          {% endfor %}
         </select>
         <span class="hint" id="filter-count">{{ total_items }} 行</span>
       </div>
@@ -210,7 +214,7 @@
             <td class="wide"><div class="cell-scroll">{{ it.problem or '' }}</div></td>
             <td class="wide"><div class="cell-scroll">{{ it.answer or '' }}</div></td>
             <td class="wide"><div class="cell-scroll">{{ it.prediction or '' }}</div></td>
-            <td><span class="grade {{ it.grade }}">{{ it.grade }}</span></td>
+            <td><span class="grade {{ it.grade }}">{{ it.grade_text or it.grade }}</span></td>
             <td>{{ it.completion_tokens }}</td>
             <td>{{ it.total_s }}</td>
           </tr>

@@ -42,6 +42,22 @@ Predicted answer: {predicted_answer}
 
 First write your explanation, then on a final line output exactly one of: [Correct], [Incorrect], [Not_Attempted]"""
 
+# 裁判判定：前三种是模型作答结果，后两种是裁判自身没给出可用判定（无效作答）
+GRADE_CORRECT = "CORRECT"
+GRADE_INCORRECT = "INCORRECT"
+GRADE_NOT_ATTEMPTED = "NOT_ATTEMPTED"
+GRADE_JUDGE_EMPTY = "JUDGE_EMPTY"       # 裁判返回内容为空
+GRADE_JUDGE_INVALID = "JUDGE_INVALID"   # 裁判有输出但不含可识别的判定标签
+INVALID_GRADES = (GRADE_JUDGE_EMPTY, GRADE_JUDGE_INVALID)
+
+GRADE_LABELS = {
+    GRADE_CORRECT: "正确",
+    GRADE_INCORRECT: "错误",
+    GRADE_NOT_ATTEMPTED: "未作答",
+    GRADE_JUDGE_EMPTY: "裁判空输出",
+    GRADE_JUDGE_INVALID: "裁判无法判断",
+}
+
 DEFAULT_DATA = "dataset/SimpleQA-Verified/simpleqa_verified.csv"
 HLE_DIR = "dataset/HLE"
 
@@ -235,17 +251,23 @@ def count_tokens(text):
 
 # ---------------------------------------------------------------- 结果解析
 def parse_grade(text):
-    low = (text or "").lower()
-    pos, grade = -1, "NOT_ATTEMPTED"
+    """把裁判输出解析成判定；无法解析时据实返回无效态，不伪装成拒答。
+
+    取最后一次出现的标签作为最终判定（模板要求末行给出结论）。
+    """
+    low = (text or "").strip().lower()
+    if not low:
+        return GRADE_JUDGE_EMPTY
+    pos, grade = -1, None
     for label, name in (
-        ("[correct]", "CORRECT"),
-        ("[incorrect]", "INCORRECT"),
-        ("[not_attempted]", "NOT_ATTEMPTED"),
+        ("[correct]", GRADE_CORRECT),
+        ("[incorrect]", GRADE_INCORRECT),
+        ("[not_attempted]", GRADE_NOT_ATTEMPTED),
     ):
         idx = low.rfind(label)
         if idx > pos:
             pos, grade = idx, name
-    return grade
+    return grade or GRADE_JUDGE_INVALID
 
 
 def extract_exact_answer(text):
@@ -309,12 +331,22 @@ def append_jsonl(path, rec):
 # ---------------------------------------------------------------- 指标汇总
 def summarise(records, model, judge_model, data, total_questions,
               incomplete_n, failed_n):
-    """把逐题记录汇总成指标字典。"""
+    """把逐题记录汇总成指标字典。
+
+    裁判空输出 / 裁判无法判断均为「无效作答」，不计入 Pass@1、拒答率等
+    正确率类指标的分母；性能类指标仍按全部记录统计。
+    """
     dfr = pd.DataFrame(records)
-    n = len(records)
-    c = int((dfr.grade == "CORRECT").sum())
-    ic = int((dfr.grade == "INCORRECT").sum())
-    na = int((dfr.grade == "NOT_ATTEMPTED").sum())
+    n_records = len(records)
+    je = int((dfr.grade == GRADE_JUDGE_EMPTY).sum())
+    ji = int((dfr.grade == GRADE_JUDGE_INVALID).sum())
+    unscored = je + ji
+    # 有效计分集合：剔除两类裁判无效判定
+    dfv = dfr[~dfr.grade.isin(INVALID_GRADES)]
+    n = len(dfv)
+    c = int((dfv.grade == GRADE_CORRECT).sum())
+    ic = int((dfv.grade == GRADE_INCORRECT).sum())
+    na = int((dfv.grade == GRADE_NOT_ATTEMPTED).sum())
     toks = dfr.completion_tokens.tolist()
     ttfts = dfr.ttft_s.tolist()
     tpots = (dfr.tpot_visible_s.dropna().tolist()
@@ -325,25 +357,33 @@ def summarise(records, model, judge_model, data, total_questions,
         v = sorted(v)
         return v[min(int(len(v) * p), len(v) - 1)]
 
+    p1 = (c / n) if n else 0.0
+    half = 1.96 * ((p1 * (1 - p1) / n) ** 0.5) if n else 0.0
     summary = {
         "model": model,
         "judge_model": judge_model,
         "dataset": os.path.basename(data),
         "num_questions": n,
         "expected_questions": total_questions,
-        "coverage": round(n / total_questions, 4) if total_questions else 0.0,
+        "num_records": n_records,
+        "coverage": (round(n_records / total_questions, 4)
+                     if total_questions else 0.0),
         "num_incomplete": incomplete_n,
         "num_failed": failed_n,
+        "num_unscored": unscored,
+        "judge_empty": je,
+        "judge_invalid": ji,
         "temperature": 0.0,
-        "counts": {"CORRECT": c, "INCORRECT": ic, "NOT_ATTEMPTED": na},
-        "pass_at_1": round(c / n, 4),
-        "pass_at_1_ci95": [
-            round(c / n - 1.96 * ((c / n) * (1 - c / n) / n) ** 0.5, 4),
-            round(c / n + 1.96 * ((c / n) * (1 - c / n) / n) ** 0.5, 4),
-        ],
+        "counts": {GRADE_CORRECT: c, GRADE_INCORRECT: ic,
+                   GRADE_NOT_ATTEMPTED: na, GRADE_JUDGE_EMPTY: je,
+                   GRADE_JUDGE_INVALID: ji},
+        "pass_at_1": round(p1, 4),
+        "pass_at_1_ci95": [round(p1 - half, 4), round(p1 + half, 4)],
         "accuracy_attempted": round(c / (c + ic), 4) if (c + ic) else None,
-        "not_attempted_rate": round(na / n, 4),
-        "output_tokens_avg": round(sum(toks) / n, 1),
+        "not_attempted_rate": round(na / n, 4) if n else 0.0,
+        "judge_invalid_rate": (round(unscored / n_records, 4)
+                               if n_records else 0.0),
+        "output_tokens_avg": round(sum(toks) / n_records, 1),
         "output_tokens_p50": round(pct(toks, 0.5)),
         "visible_tokens_avg": (
             round(float(dfr.content_tokens.mean()), 1)
@@ -361,12 +401,14 @@ def summarise(records, model, judge_model, data, total_questions,
         "e2e_latency_p90_s": round(pct(walls, 0.9), 2),
     }
     summary["by_topic"] = {
-        t: {"n": int(len(g)), "pass_at_1": round(float((g.grade == "CORRECT").mean()), 4)}
-        for t, g in dfr.groupby("topic")
+        t: {"n": int(len(g)),
+            "pass_at_1": round(float((g.grade == GRADE_CORRECT).mean()), 4)}
+        for t, g in dfv.groupby("topic")
     }
     summary["by_answer_type"] = {
-        t: {"n": int(len(g)), "pass_at_1": round(float((g.grade == "CORRECT").mean()), 4)}
-        for t, g in dfr.groupby("answer_type")
+        t: {"n": int(len(g)),
+            "pass_at_1": round(float((g.grade == GRADE_CORRECT).mean()), 4)}
+        for t, g in dfv.groupby("answer_type")
     }
     return summary
 
@@ -601,14 +643,16 @@ class HttpClient:
                 time.sleep(wait_s)
         raise RuntimeError(f"stream failed after {retries}: {last} {tag}")
 
-    def chat_json(self, model, prompt, max_tokens=2048, retries=8, temperature=0.0,
+    def chat_json(self, model, prompt, max_tokens=None, retries=8, temperature=0.0,
                   tag=""):
+        """裁判（非流式）调用。max_tokens 为 None 时不传该字段，用服务端默认值。"""
         payload = {
             "model": model,
             "messages": [{"role": "user", "content": prompt}],
-            "max_tokens": max_tokens,
             "temperature": temperature,
         }
+        if max_tokens is not None:
+            payload["max_tokens"] = max_tokens
         self._log_request("json", payload, tag)
         last = None
         for k in range(retries):

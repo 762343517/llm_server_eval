@@ -20,6 +20,14 @@ zhipuEval
 HLE 中带图题目（342 题）会自动以 OpenAI 多模态格式发送（`image_url` + base64 data-url），
 图片不落入逐题记录，只记 `has_image` 标记。
 
+## 判定与计分口径
+
+- 裁判请求不指定 `max_tokens`，输出上限交由服务端默认参数决定（裁判思考与判定正文共享该预算）。
+- 逐题判定分五类：`CORRECT` / `INCORRECT` / `NOT_ATTEMPTED`（模型拒答或未作答）属有效判定；
+  `JUDGE_EMPTY`（裁判空输出）与 `JUDGE_INVALID`（裁判有输出但无可识别标签）属无效判定。
+- 无效判定按「无效作答」处理：**不计入 Pass@1、拒答率、仅计作答等正确率类指标的分母**；
+  token/时延等性能指标仍按全部记录统计。结果页对两类分别展示、可单独筛选。
+
 ## 启动
 ```bash
 python3 script/webapp.py --host 0.0.0.0 --port 8000   # Web 界面，数据集在表单中选择

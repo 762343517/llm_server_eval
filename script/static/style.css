@@ -194,6 +194,8 @@ th.num, td.num { text-align: right; font-variant-numeric: tabular-nums; }
 .grade.CORRECT { background: #e6f7ec; color: var(--ok); }
 .grade.INCORRECT { background: #fdecec; color: var(--bad); }
 .grade.NOT_ATTEMPTED { background: #f0f2f5; color: var(--mute); }
+.grade.JUDGE_EMPTY,
+.grade.JUDGE_INVALID { background: #fff5e2; color: var(--warn); }
 
 .dot {
   display: inline-block; width: 7px; height: 7px; border-radius: 50%;
@@ -236,6 +238,9 @@ th.num, td.num { text-align: right; font-variant-numeric: tabular-nums; }
 .kpi.ok b { color: var(--ok); }
 .kpi.bad b { color: var(--bad); }
 .kpi.mute b { color: var(--mute); }
+.kpi.invalid { background: #fffaf0; border-color: #f5e3c3; }
+.kpi.invalid b { color: var(--warn); }
+.kpi.invalid small { color: var(--warn); }
 
 .split { display: grid; grid-template-columns: 1fr 1fr; gap: 22px; }
 

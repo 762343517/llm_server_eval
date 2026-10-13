@@ -356,8 +356,12 @@ def run_page(request: Request, run_id: str):
         cfg.get("thinking"), cfg.get("reasoning_effort"))
     snap["judge_thinking_text"] = eval_core.thinking_label(
         cfg.get("judge_thinking"), cfg.get("judge_reasoning_effort"))
+    for it in items:
+        it["grade_text"] = eval_core.GRADE_LABELS.get(it.get("grade"),
+                                                      it.get("grade") or "")
     return templates.TemplateResponse(request, "run.html", {
         "run": snap, "items": items,
+        "grade_options": list(eval_core.GRADE_LABELS.items()),
         "total_items": len(manager.read_items(run_id)) if items else 0,
     })
 
