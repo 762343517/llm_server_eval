@@ -2,16 +2,60 @@
 
 每个任务在 runs/<run_id>/ 下落盘，服务重启后历史任务仍可查看/下载。
 """
+import calendar
 import collections
 import csv
 import json
 import os
 import threading
 import time
+from datetime import datetime, timedelta, timezone
 
 import eval_core
 
 RUNS_DIR = os.environ.get("RUNS_DIR", "runs")
+
+TIME_FMT = "%Y-%m-%d %H:%M:%S"
+
+# 展示时区：容器/服务器多以 UTC 运行，直接用系统时区渲染会比本地时间少 8 小时。
+# 用 ZHIPU_EVAL_TZ 指定（默认东八区），设为 local/system 则沿用系统时区。
+TZ_NAME = (os.environ.get("ZHIPU_EVAL_TZ") or "Asia/Shanghai").strip()
+_LOCAL_TZ = TZ_NAME.lower() in ("", "local", "system", "localtime")
+# 无法加载命名时区（镜像缺 tzdata）时，这些名字退回固定 +08:00
+_TZ_PLUS8 = ("asia/shanghai", "asia/chongqing", "asia/harbin", "asia/urumqi", "prc")
+
+
+def _load_tz(name):
+    if _LOCAL_TZ:
+        return None
+    try:
+        from zoneinfo import ZoneInfo
+        return ZoneInfo(name)
+    except Exception:  # noqa: BLE001
+        if name.lower() in _TZ_PLUS8:
+            return timezone(timedelta(hours=8))
+        return None
+
+
+DISPLAY_TZ = _load_tz(TZ_NAME)
+
+
+def _fmt(ts, fmt=TIME_FMT):
+    """按展示时区格式化时间戳；ts 为 None 时返回 None。"""
+    if ts is None:
+        return None
+    dt = (datetime.fromtimestamp(ts) if DISPLAY_TZ is None
+          else datetime.fromtimestamp(ts, DISPLAY_TZ))
+    return dt.strftime(fmt)
+
+
+def _now():
+    return _fmt(time.time())
+
+
+def new_run_id():
+    return _fmt(time.time(), "%Y%m%d-%H%M%S") + "-" + os.urandom(2).hex()
+
 
 CSV_COLUMNS = [
     ("original_index", "题号"),
@@ -33,14 +77,6 @@ CSV_COLUMNS = [
     ("finish_reason", "结束原因"),
     ("incomplete", "是否截断"),
 ]
-
-
-def _now():
-    return time.strftime("%Y-%m-%d %H:%M:%S")
-
-
-def new_run_id():
-    return time.strftime("%Y%m%d-%H%M%S") + "-" + os.urandom(2).hex()
 
 
 class RunState:
@@ -154,12 +190,8 @@ class RunState:
                 "error": self.error,
                 "started_at": self.started_at,
                 "finished_at": self.finished_at,
-                "started_at_str": time.strftime(
-                    "%Y-%m-%d %H:%M:%S", time.localtime(self.started_at)),
-                "finished_at_str": (
-                    time.strftime("%Y-%m-%d %H:%M:%S",
-                                  time.localtime(self.finished_at))
-                    if self.finished_at else None),
+                "started_at_str": _fmt(self.started_at),
+                "finished_at_str": _fmt(self.finished_at),
                 "duration_s": round(
                     (self.finished_at or time.time()) - self.started_at, 1),
                 "load": dict(self.load),
@@ -268,8 +300,7 @@ class RunManager:
         path = os.path.join(self.runs_dir, run_id, "meta.json")
         if os.path.exists(path):
             try:
-                with open(path) as f:
-                    return _mark_interrupted(json.load(f), path)
+                return _load_snapshot(path)
             except Exception:  # noqa: BLE001
                 return None
         return None
@@ -290,8 +321,7 @@ class RunManager:
                 path = os.path.join(self.runs_dir, rid, "meta.json")
                 if os.path.exists(path):
                     try:
-                        with open(path) as f:
-                            items[rid] = _mark_interrupted(json.load(f), path)
+                        items[rid] = _load_snapshot(path)
                     except Exception:  # noqa: BLE001
                         continue
         out = sorted(items.values(), key=lambda x: x.get("started_at", 0),
@@ -341,6 +371,46 @@ class RunManager:
         return True
 
 
+def _legacy_offset(snap):
+    """从旧快照反推写入进程相对 UTC 的偏移（秒）。
+
+    旧版本用写入进程的系统时区（多为 UTC）直接渲染 started_at_str，
+    与同文件里的 started_at（epoch）一比即可还原当时的偏移，用于平移日志时间。
+    """
+    try:
+        written = calendar.timegm(time.strptime(snap["started_at_str"], TIME_FMT))
+        return written - float(snap["started_at"])
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return 0.0
+
+
+def _restamp(snap):
+    """把磁盘快照中的时间字符串改为按展示时区渲染。
+
+    起止时间直接按 epoch 重算；日志里只有字符串（写入进程的本地时间），
+    用 _legacy_offset 推出偏移后先还原成 epoch，再按展示时区渲染。
+    """
+    legacy = _legacy_offset(snap)
+    if snap.get("started_at"):
+        snap["started_at_str"] = _fmt(snap["started_at"])
+    if snap.get("finished_at"):
+        snap["finished_at_str"] = _fmt(snap["finished_at"])
+    if legacy and isinstance(snap.get("logs"), list):
+        for entry in snap["logs"]:
+            try:
+                naive = time.strptime(entry["t"], TIME_FMT)
+            except (KeyError, TypeError, ValueError):
+                continue
+            entry["t"] = _fmt(calendar.timegm(naive) - legacy)
+    return snap
+
+
+def _load_snapshot(path):
+    """读取磁盘快照：修正展示时区，再补上「已中断」标记。"""
+    with open(path) as f:
+        return _mark_interrupted(_restamp(json.load(f)), path)
+
+
 def _mark_interrupted(snap, path=None):
     """磁盘快照仍停留在 running，说明该任务所属进程已退出，标记为「已中断」。
 
@@ -361,15 +431,12 @@ def _mark_interrupted(snap, path=None):
     if not ended or ended < started:
         ended = None
     snap["finished_at"] = ended
-    snap["finished_at_str"] = (
-        time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ended))
-        if ended else None)
+    snap["finished_at_str"] = _fmt(ended)
     if ended:
         snap["duration_s"] = round(ended - started, 1)
     if isinstance(snap.get("logs"), list):
         snap["logs"].append({
-            "t": time.strftime("%Y-%m-%d %H:%M:%S",
-                               time.localtime(ended or time.time())),
+            "t": _now(),
             "msg": "[中断] 服务重启或进程退出，任务未能跑完",
         })
     return snap

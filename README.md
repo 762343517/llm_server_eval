@@ -27,6 +27,18 @@ python3 script/simpleqa_eval.py --data dataset/HLE/test-00000-of-00001.parquet \
     --model GLM-5.2-zhipu --judge-model DeepSeek-V4-Flash-0731 --out results/hle
 ```
 
+## 时间显示时区
+
+容器/服务器常以 UTC 运行，若直接按系统时区渲染，任务起止时间会比本地时间少 8 小时。
+起止时间、任务日志、任务目录名（run_id）统一按 `ZHIPU_EVAL_TZ` 渲染，默认 `Asia/Shanghai`：
+
+```bash
+ZHIPU_EVAL_TZ=Asia/Shanghai python3 script/webapp.py --host 0.0.0.0 --port 8000
+ZHIPU_EVAL_TZ=local python3 script/webapp.py --host 0.0.0.0 --port 8000  # 沿用系统时区
+```
+
+历史任务无需迁移：起止时间由落盘 epoch 重新计算，日志时间按写入进程当时的偏移整体平移。
+
 ## 思考开关与强度
 被测模型与裁判模型各自独立控制，取值三态：**不传**（默认，交给服务端决定）、**开启**、**关闭**。
 开启时可再指定强度 `low|medium|high|max`（关闭或不传时不注入该字段）。
