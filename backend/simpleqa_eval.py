@@ -27,14 +27,12 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+import consts  # noqa: E402
 import eval_core  # noqa: E402
 
-DEFAULT_ENDPOINT = os.environ.get(
-    "ENDPOINT", "http://10.174.0.70:34000/v1/chat/completions"
-)
-DEFAULT_API_KEY = os.environ.get(
-    "API_KEY", "sk-vgeocsgvmkutmzivcrkaiyxxjygwcazjozlgkpyqmamovclv"
-)
+# 端点/密钥默认值统一维护在 consts.py；此处仅保留端点的环境变量覆盖能力
+DEFAULT_ENDPOINT = os.environ.get("ENDPOINT") or consts.DEFAULT_ENDPOINT
+DEFAULT_API_KEY = consts.DEFAULT_API_KEY
 
 
 def make_printer():

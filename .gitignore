@@ -1,1 +1,15 @@
+# 评测/压测任务的运行数据（含结果文件与明文密钥的 last_config）
 runs/*
+
+# Python
+__pycache__/
+*.py[cod]
+
+# 前端依赖与本地构建缓存
+frontend/node_modules/
+frontend/.vite/
+frontend/dist/
+
+# 前端构建产物由 FastAPI 托管，如需部署到无 Node 环境的机器可直接提交；
+# 若团队约定不提交产物，取消下面一行注释即可。
+# backend/webui/

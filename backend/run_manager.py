@@ -18,7 +18,7 @@ import eval_core
 RUNS_DIR = os.environ.get("RUNS_DIR", "runs")
 
 # run_id 直接参与拼路径（删除时会 rmtree），必须挡住 ".." 之类的越权名字
-_RUN_ID_RE = re.compile(r"^[0-9A-Za-z][0-9A-Za-z._-]{0,63}$")
+_RUN_ID_RE = re.compile(r"^(?!.*\.\.)[0-9A-Za-z][0-9A-Za-z._-]{0,63}$")
 
 TIME_FMT = "%Y-%m-%d %H:%M:%S"
 
@@ -394,6 +394,9 @@ class RunManager:
         with self._lock:
             st = self._states.pop(run_id, None)
         target = os.path.join(self.runs_dir, run_id)
+        root = os.path.realpath(self.runs_dir)
+        if os.path.dirname(os.path.realpath(target)) != root:
+            return False                    # 兜底：删除目标必须落在 runs 目录内
         if st is None:
             existed = os.path.isdir(target)
             shutil.rmtree(target, ignore_errors=True)
@@ -491,3 +494,11 @@ def _mask(key):
     if len(key) <= 10:
         return key[:2] + "***"
     return key[:6] + "***" + key[-4:]
+
+
+# 压测任务管理复用同一套命名/时间/脱敏/快照恢复逻辑，这里给出公开别名
+RUN_ID_RE = _RUN_ID_RE
+fmt_time = _fmt
+mask_secret = _mask
+mark_interrupted = _mark_interrupted
+load_snapshot = _load_snapshot
