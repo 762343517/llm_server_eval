@@ -1,7 +1,7 @@
 import { reactive } from 'vue'
 import { api } from './api'
 
-// 全局共享的应用元信息（表单默认值、选项、llm-grill 可用性）
+// 全局共享的应用元信息（表单默认值、选项、evalscope 可用性）
 export const store = reactive({
   meta: null,
   error: '',
@@ -27,7 +27,7 @@ export const store = reactive({
   get stressDefaults() {
     return (this.meta && this.meta.stress && this.meta.stress.defaults) || {}
   },
-  get grill() {
-    return (this.meta && this.meta.stress && this.meta.stress.grill) || {}
+  get evalscope() {
+    return (this.meta && this.meta.stress && this.meta.stress.evalscope) || {}
   },
 })

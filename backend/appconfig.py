@@ -93,8 +93,6 @@ def stress_defaults():
     d = {
         "name": consts.DEFAULT_STRESS_NAME,
         "description": "",
-        "backend_name": consts.DEFAULT_STRESS_BACKEND_NAME,
-        "backend_type": consts.DEFAULT_STRESS_BACKEND_TYPE,
         "endpoint": DEFAULT_STRESS_ENDPOINT,
         "api_key": DEFAULT_STRESS_API_KEY,
         "model": consts.DEFAULT_STRESS_MODEL,
@@ -110,8 +108,6 @@ def stress_defaults():
         "concurrency_mode": consts.DEFAULT_STRESS_CONCURRENCY_MODE,
         "concurrent_users": consts.DEFAULT_STRESS_CONCURRENT_USERS,
         "iterations": consts.DEFAULT_STRESS_ITERATIONS,
-        "ramp_up_seconds": 0,
-        "think_time_seconds": 0,
         "ramp_levels_text": consts.DEFAULT_STRESS_RAMP_LEVELS_TEXT,
         "ramp_pause_seconds": consts.DEFAULT_STRESS_RAMP_PAUSE_SECONDS,
     }

@@ -23,7 +23,37 @@ const running = computed(() => isRunning(snap.value && snap.value.status))
 const gen = computed(() => (snap.value && snap.value.gen) || {})
 const judge = computed(() => (snap.value && snap.value.judge) || {})
 const summary = computed(() => (snap.value && snap.value.summary) || {})
+const cfg = computed(() => (snap.value && snap.value.cfg) || {})
 const grades = computed(() => [...new Set(items.value.map((i) => i.grade).filter(Boolean))])
+
+// 思考模式/强度的友好文案，与新建表单的选项标签保持一致
+const THINKING_TEXT = { '': '服务端默认', enabled: '开启思考', disabled: '关闭思考' }
+const EFFORT_TEXT = { '': '默认', low: 'low', medium: 'medium', high: 'high', max: 'max' }
+
+const cfgRows = computed(() => {
+  const c = cfg.value
+  const text = (v) => (v === null || v === undefined || v === '' ? '—' : String(v))
+  return [
+    { k: '被测模型', v: text(c.model) },
+    { k: '被测端点', v: text(c.endpoint) },
+    { k: '被测 API Key', v: text(c.api_key) },
+    { k: '裁判模型', v: text(c.judge_model) },
+    { k: '裁判端点', v: text(c.judge_endpoint) },
+    { k: '裁判 API Key', v: text(c.judge_api_key) },
+    { k: '数据集', v: text(c.data) },
+    { k: '思考模式', v: THINKING_TEXT[c.thinking] || text(c.thinking) },
+    { k: '思考强度', v: EFFORT_TEXT[c.reasoning_effort] || text(c.reasoning_effort) },
+    { k: '裁判思考模式', v: THINKING_TEXT[c.judge_thinking] || text(c.judge_thinking) },
+    { k: '裁判思考强度', v: EFFORT_TEXT[c.judge_reasoning_effort] || text(c.judge_reasoning_effort) },
+    { k: '作答并发', v: text(c.concurrency) },
+    { k: '判分并发', v: text(c.judge_concurrency) },
+    { k: '题数上限', v: c.limit ? String(c.limit) : '全部' },
+    { k: '随机种子', v: c.seed ? String(c.seed) : '不固定' },
+    { k: 'max_tokens', v: text(c.max_tokens) },
+    { k: 'max_tokens 上限', v: text(c.max_tokens_cap) },
+    { k: '未完成重试次数', v: text(c.max_incomplete_attempts) },
+  ]
+})
 
 // 判定取值来自后端 GRADE_*（CORRECT / INCORRECT / NOT_ATTEMPTED…），统一小写比较
 const gradeOf = (g) => String(g || '').trim().toLowerCase()
@@ -153,6 +183,12 @@ onUnmounted(() => timer && clearInterval(timer))
       <StatTile label="数据集" :value="int((snap.load || {}).total)" sub="题" />
       <StatTile label="耗时" :value="duration(snap.duration_s)" />
     </div>
+  </section>
+
+  <section v-if="snap" class="card">
+    <h2>配置参数</h2>
+    <p class="hint">本次评测提交的运行配置（API Key 已脱敏）</p>
+    <KvList :items="cfgRows" />
   </section>
 
   <section class="card">

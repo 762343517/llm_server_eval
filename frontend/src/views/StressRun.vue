@@ -2,7 +2,7 @@
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { RouterLink, useRoute, useRouter } from 'vue-router'
 import { api } from '../api'
-import { LogPanel, MiniChart, ProgressBar, StatTile, StatusBadge } from '../components/index.js'
+import { KvList, LogPanel, MiniChart, ProgressBar, StatTile, StatusBadge } from '../components/index.js'
 import { compact, duration, int, isRunning, num, pct, shortFixed } from '../format'
 
 const route = useRoute()
@@ -16,8 +16,8 @@ const recordTotal = ref(0)
 const error = ref('')
 const busy = ref(false)
 const filters = ref({ limit: 200, onlyErrors: false })
-const scenario = ref(null)
-const showScenario = ref(false)
+const args = ref(null)
+const showArgs = ref(false)
 
 let timer = null
 let tick = 0
@@ -27,6 +27,41 @@ const metrics = computed(() => (snap.value && (snap.value.summary || snap.value.
 const byLevel = computed(() => (snap.value && snap.value.by_level) || [])
 const conv = computed(() => snap.value && snap.value.conv)
 const isRamp = computed(() => byLevel.value.length > 0)
+const cfg = computed(() => (snap.value && snap.value.cfg) || {})
+
+const cfgRows = computed(() => {
+  const c = cfg.value
+  const text = (v) => (v === null || v === undefined || v === '' ? '—' : String(v))
+  return [
+    { k: '任务名称', v: text(c.name) },
+    { k: '说明', v: text(c.description) },
+    { k: '服务端点', v: text(c.endpoint) },
+    { k: 'API Key', v: text(c.api_key) },
+    { k: '模型名', v: text(c.model) },
+    { k: 'max_tokens', v: text(c.max_tokens) },
+    { k: 'temperature', v: text(c.temperature) },
+    { k: 'top_p', v: text(c.top_p) },
+    { k: 'top_k', v: c.top_k === -1 ? '-1（不发送）' : text(c.top_k) },
+    { k: '请求超时', v: c.timeout === null || c.timeout === undefined ? '—' : `${c.timeout}s` },
+    { k: '系统提示词', v: text(c.system_prompt) },
+    { k: '提问内容', v: text(c.prompt) },
+    { k: '对话轮数', v: text(c.turns) },
+    { k: '会话唯一前缀', v: c.unique_prefix ? '是' : '否' },
+    { k: '加压方式', v: c.concurrency_mode === 'ramp' ? '阶梯加压' : '固定并发' },
+    { k: '并发用户数', v: text(c.concurrent_users) },
+    { k: '每个并发会话数', v: text(c.iterations) },
+    {
+      k: '并发档位',
+      v: Array.isArray(c.ramp_levels) && c.ramp_levels.length ? c.ramp_levels.join(' / ') : '—',
+    },
+    {
+      k: '档位间隔',
+      v: c.ramp_pause_seconds === null || c.ramp_pause_seconds === undefined
+        ? '—'
+        : `${c.ramp_pause_seconds}s`,
+    },
+  ]
+})
 
 const chartSeries = [
   { key: 'rps', label: 'RPS', color: '#2563eb', digits: 2 },
@@ -62,19 +97,19 @@ const loadSnap = async () => {
   }
 }
 
-const loadScenario = async () => {
-  showScenario.value = !showScenario.value
-  if (!showScenario.value || scenario.value) return
+const loadArgs = async () => {
+  showArgs.value = !showArgs.value
+  if (!showArgs.value || args.value) return
   try {
-    const data = await api.stressScenario(runId)
-    scenario.value = data.text
+    const data = await api.stressArgs(runId)
+    args.value = data.text
   } catch (e) {
     error.value = e.message
   }
 }
 
 const stopRun = async () => {
-  if (!window.confirm('确认停止压测？llm-grill 子进程会被终止，已完成的结果保留。')) return
+  if (!window.confirm('确认停止压测？evalscope 子进程会被终止，已完成的结果保留。')) return
   busy.value = true
   try {
     await api.stressStop(runId)
@@ -87,7 +122,7 @@ const stopRun = async () => {
 }
 
 const deleteRun = async () => {
-  if (!window.confirm(`确认删除压测任务 ${runId}？场景与结果文件会一并删除，且不可恢复。`)) return
+  if (!window.confirm(`确认删除压测任务 ${runId}？数据集与结果文件会一并删除，且不可恢复。`)) return
   busy.value = true
   try {
     await api.stressDelete(runId)
@@ -128,8 +163,8 @@ onUnmounted(() => timer && clearInterval(timer))
       <RouterLink class="btn" to="/stress">返回列表</RouterLink>
       <RouterLink class="btn" :to="`/stress/${runId}/csv`">结果表格</RouterLink>
       <a class="btn" :href="`/api/stress/runs/${runId}/download.csv`">下载 CSV</a>
-      <button class="btn" @click="loadScenario">
-        {{ showScenario ? '收起场景' : '查看场景 YAML' }}
+      <button class="btn" @click="loadArgs">
+        {{ showArgs ? '收起运行参数' : '查看运行参数' }}
       </button>
       <button v-if="running" class="btn danger" :disabled="busy" @click="stopRun">停止</button>
       <button class="btn danger" :disabled="busy" @click="deleteRun">删除</button>
@@ -179,6 +214,12 @@ onUnmounted(() => timer && clearInterval(timer))
       <StatTile label="输出 token" :value="compact(metrics.completion_tokens_total)" />
       <StatTile label="压测总时长" :value="duration(metrics.total_duration_s)" />
     </div>
+  </section>
+
+  <section v-if="snap" class="card">
+    <h2>配置参数</h2>
+    <p class="hint">本次压测提交的运行配置（API Key 已脱敏）</p>
+    <KvList :items="cfgRows" />
   </section>
 
   <section class="card">
@@ -330,11 +371,12 @@ onUnmounted(() => timer && clearInterval(timer))
     </div>
   </section>
 
-  <section v-if="showScenario" class="card">
-    <h2>场景文件（api_key 已脱敏）</h2>
+  <section v-if="showArgs" class="card">
+    <h2>运行参数（api_key 已脱敏）</h2>
+    <p class="hint">evalscope 命令行与本次运行参数，原文见任务目录 args.json。</p>
     <details class="scenario" open>
-      <summary>scenario.yaml</summary>
-      <pre>{{ scenario || '加载中…' }}</pre>
+      <summary>args.json</summary>
+      <pre>{{ args || '加载中…' }}</pre>
     </details>
   </section>
 

@@ -59,7 +59,7 @@ export const api = {
     ),
   stressSeries: (id, buckets = 60) =>
     request(`/api/stress/runs/${encodeURIComponent(id)}/series${query({ buckets })}`),
-  stressScenario: (id) => request(`/api/stress/runs/${encodeURIComponent(id)}/scenario`),
+  stressArgs: (id) => request(`/api/stress/runs/${encodeURIComponent(id)}/args`),
   stressStop: (id) => post(`/api/stress/runs/${encodeURIComponent(id)}/stop`),
   stressDelete: (id) =>
     request(`/api/stress/runs/${encodeURIComponent(id)}`, { method: 'DELETE' }),

@@ -14,8 +14,7 @@ const submitting = ref(false)
 const busyId = ref('')
 let timer = null
 
-const grill = computed(() => store.grill)
-const backendTypes = computed(() => (store.meta && store.meta.stress.backend_types) || [])
+const evalscope = computed(() => store.evalscope)
 const hasRunning = computed(() => runs.value.some((r) => isRunning(r.status)))
 
 const levels = computed(() =>
@@ -75,7 +74,7 @@ const stopRun = async (run) => {
 }
 
 const deleteRun = async (run) => {
-  if (!window.confirm(`确认删除压测任务 ${run.run_id}？场景与结果文件会一并删除。`)) return
+  if (!window.confirm(`确认删除压测任务 ${run.run_id}？数据集与结果文件会一并删除。`)) return
   busyId.value = run.run_id
   try {
     await api.stressDelete(run.run_id)
@@ -102,7 +101,7 @@ onUnmounted(() => timer && clearInterval(timer))
   <div class="page-head">
     <div>
       <h1>压力测试</h1>
-      <div class="sub">调用 llm-grill 对本地模型服务压测：并发 / 阶梯加压、首字延迟、吞吐与 KV 缓存命中</div>
+      <div class="sub">调用 evalscope 对本地模型服务压测：并发 / 阶梯加压、首字延迟、吞吐与缓存命中</div>
     </div>
     <div class="actions">
       <button class="btn" @click="loadRuns">刷新列表</button>
@@ -110,16 +109,17 @@ onUnmounted(() => timer && clearInterval(timer))
   </div>
 
   <div v-if="error" class="alert bad">{{ error }}</div>
-  <div v-if="!grill.available" class="alert warn">
-    llm-grill 当前不可用：{{ grill.error || '未找到可执行文件' }}。
-    安装后可自动识别（uv tool install llm-grill），或用环境变量 LLM_GRILL_BIN 指定完整路径。
+  <div v-if="!evalscope.available" class="alert warn">
+    evalscope 当前不可用：{{ evalscope.error || '未找到可执行文件' }}。
+    安装后可自动识别（pip install evalscope），或用环境变量 EVALSCOPE_BIN 指定完整路径。
   </div>
 
   <section class="card">
     <h2>新建压测任务</h2>
     <p class="hint">
-      llm-grill 固定请求 <code>/v1/chat/completions</code>，此处只需填写到端口（如
-      <code>http://10.174.0.70:34000</code>），多余路径会被自动去除。
+      evalscope 请求 <code>/chat/completions</code>。此处可填写到端口（如
+      <code>http://10.174.0.70:34000</code>），或已含 <code>/v1</code> 前缀的地址，
+      缺失的 <code>/chat/completions</code> 会自动补全。
     </p>
 
     <div class="grid">
@@ -130,14 +130,6 @@ onUnmounted(() => timer && clearInterval(timer))
       <div class="field span-2">
         <label>说明（可选）</label>
         <input v-model.trim="form.description" type="text" />
-      </div>
-      <div class="field">
-        <label>后端类型</label>
-        <select v-model="form.backend_type">
-          <option v-for="[value, label] in backendTypes" :key="value" :value="value">
-            {{ label }}
-          </option>
-        </select>
       </div>
       <div class="field span-2">
         <label>服务端点</label>
@@ -220,21 +212,13 @@ onUnmounted(() => timer && clearInterval(timer))
           <input v-model.trim="form.ramp_levels_text" type="text" placeholder="2, 4, 8, 16" />
         </div>
         <div class="field">
-          <label>每档停留时长（秒，0 = 跑完即换档）</label>
+          <label>档位间隔（秒，0 = 跑完即换档）</label>
           <input v-model.number="form.ramp_pause_seconds" type="number" min="0" max="3600" />
         </div>
       </template>
       <div class="field">
-        <label>每用户迭代次数</label>
+        <label>每个并发会话数</label>
         <input v-model.number="form.iterations" type="number" min="1" max="10000" />
-      </div>
-      <div class="field">
-        <label>爬坡时长（秒，0 = 立即满并发）</label>
-        <input v-model.number="form.ramp_up_seconds" type="number" min="0" max="3600" />
-      </div>
-      <div class="field">
-        <label>思考时间（秒，每轮间隔）</label>
-        <input v-model.number="form.think_time_seconds" type="number" min="0" max="3600" />
       </div>
     </div>
 
@@ -246,7 +230,7 @@ onUnmounted(() => timer && clearInterval(timer))
     </div>
 
     <div class="row mt">
-      <button class="btn primary" :disabled="submitting || !grill.available" @click="submit">
+      <button class="btn primary" :disabled="submitting || !evalscope.available" @click="submit">
         {{ submitting ? '正在启动…' : '启动压测' }}
       </button>
       <span class="muted">启动后进入任务详情页，可实时查看 RPS / 延迟曲线与逐请求明细。</span>

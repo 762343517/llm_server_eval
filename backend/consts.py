@@ -4,8 +4,8 @@
 默认并发时，仅修改此处。
 
 - 精度测试：被测与裁判是两套独立的端点/密钥/模型，裁判端点留空表示复用被测的那一套；
-- 压力测试：压测目标默认复用被测服务（llm-grill 固定请求 /v1/chat/completions，
-  多填的路径会被归一化掉，因此填到端口即可）；
+- 压力测试：压测目标默认复用被测服务（evalscope 走 OpenAI 兼容的
+  /v1/chat/completions，多填的路径会被归一化掉，因此填到端口即可）；
 - 这些只是「表单 / 命令行的初始值」，用户在页面提交过配置后由 appconfig 读取的
   last_config 覆盖。
 """
@@ -39,8 +39,6 @@ DEFAULT_MAX_INCOMPLETE_ATTEMPTS = 2
 DEFAULT_STRESS_ENDPOINT = DEFAULT_ENDPOINT
 DEFAULT_STRESS_API_KEY = DEFAULT_API_KEY
 DEFAULT_STRESS_NAME = "本地模型压测"
-DEFAULT_STRESS_BACKEND_NAME = "target"
-DEFAULT_STRESS_BACKEND_TYPE = "openai"
 DEFAULT_STRESS_MODEL = DEFAULT_MODEL
 DEFAULT_STRESS_MAX_TOKENS = 512
 DEFAULT_STRESS_TEMPERATURE = 0.0

@@ -1,7 +1,7 @@
 """FastAPI 后端：精度测试 + 压力测试的统一 JSON 接口，并托管 Vue 前端产物。
 
 路由约定：
-  /api/meta                 应用元信息（表单默认值、选项、llm-grill 状态）
+  /api/meta                 应用元信息（表单默认值、选项、evalscope 状态）
   /api/accuracy/*           精度测试：任务列表 / 启动 / 详情 / 逐题 / 停止 / 删除 / CSV
   /api/stress/*             压力测试：任务列表 / 启动 / 详情 / 明细 / 停止 / 删除 / CSV
   /api/csv                  工作区内 CSV 文件预览
@@ -10,7 +10,6 @@
 import argparse
 import csv
 import os
-import re
 import sys
 from contextlib import asynccontextmanager
 
@@ -25,14 +24,14 @@ import appconfig      # noqa: E402
 import consts         # noqa: E402
 import csvview        # noqa: E402
 import eval_core      # noqa: E402
-import grill_core     # noqa: E402
-import grill_manager  # noqa: E402
+import perf_core      # noqa: E402
+import perf_manager   # noqa: E402
 import run_manager    # noqa: E402
 
 WEBUI_DIR = os.path.join(BASE_DIR, "webui")
 
 accuracy = run_manager.RunManager()
-stress = grill_manager.StressManager()
+stress = perf_manager.StressManager()
 
 
 @asynccontextmanager
@@ -119,9 +118,7 @@ def api_meta():
         },
         "stress": {
             "defaults": appconfig.stress_defaults(),
-            "backend_types": [[k, grill_core.BACKEND_LABELS[k]]
-                              for k in grill_core.BACKEND_TYPES],
-            "grill": grill_core.probe(),
+            "evalscope": perf_core.probe(),
         },
         "csv": {"default_limit": csvview.CSV_DEFAULT_LIMIT,
                 "max_limit": csvview.CSV_MAX_LIMIT},
@@ -279,19 +276,8 @@ def accuracy_download_csv(run_id: str):
 # ---------------------------------------------------------------- 压力测试
 # 参数上限保护：防止误操作压垮目标服务，或使单轮压测长时间无法结束
 STRESS_CAPS = {"max_tokens": 131072, "turns": 100, "concurrent_users": 1024,
-               "iterations": 10000, "timeout": 3600, "think_time_seconds": 3600,
-               "ramp_up_seconds": 3600, "ramp_pause_seconds": 3600, "level": 1024,
-               "levels": 20}
-
-
-_API_KEY_LINE = re.compile(r'^(\s*api_key\s*:\s*)"?([^"\n]+)"?\s*$', re.M)
-
-
-def _mask_scenario(text):
-    """回显场景 YAML 前对 api_key 脱敏（原文仅保留在任务目录的 scenario.yaml 中）。"""
-    return _API_KEY_LINE.sub(
-        lambda m: "{}{}".format(m.group(1), run_manager.mask_secret(m.group(2).strip())),
-        text)
+               "iterations": 10000, "timeout": 3600, "ramp_pause_seconds": 3600,
+               "level": 1024, "levels": 20}
 
 
 def _capped(value, key, label):
@@ -303,7 +289,7 @@ def _capped(value, key, label):
 
 
 def _stress_cfg(payload):
-    """校验并归一化压测配置，供 grill_manager 生成 llm-grill 场景。"""
+    """校验并归一化压测配置，供 perf_manager 生成 evalscope 数据集与命令行。"""
     mode = "ramp" if (payload.get("concurrency_mode") or "fixed") == "ramp" else "fixed"
     levels_text = payload.get("ramp_levels_text") or ""
     levels = appconfig.parse_levels(levels_text) if mode == "ramp" else []
@@ -318,11 +304,6 @@ def _stress_cfg(payload):
     cfg = {
         "name": (payload.get("name") or "stress").strip() or "stress",
         "description": (payload.get("description") or "").strip(),
-        "backend_name": ((payload.get("backend_name")
-                          or consts.DEFAULT_STRESS_BACKEND_NAME).strip()
-                         or consts.DEFAULT_STRESS_BACKEND_NAME),
-        "backend_type": (payload.get("backend_type")
-                         or consts.DEFAULT_STRESS_BACKEND_TYPE).strip(),
         "endpoint": (payload.get("endpoint") or "").strip(),
         "api_key": (payload.get("api_key") or "").strip(),
         "model": (payload.get("model") or "").strip(),
@@ -342,10 +323,6 @@ def _stress_cfg(payload):
         "concurrent_users": max(1, _capped(payload.get("concurrent_users"),
                                            "concurrent_users", "并发用户数")),
         "iterations": max(1, _capped(payload.get("iterations"), "iterations", "迭代次数")),
-        "ramp_up_seconds": max(0.0, min(_float(payload.get("ramp_up_seconds"), 0.0),
-                                        STRESS_CAPS["ramp_up_seconds"])),
-        "think_time_seconds": max(0.0, min(_float(payload.get("think_time_seconds"), 0.0),
-                                          STRESS_CAPS["think_time_seconds"])),
         "ramp_levels": levels,
         "ramp_pause_seconds": max(0.0, min(
             _float(payload.get("ramp_pause_seconds"),
@@ -381,9 +358,9 @@ def stress_start(payload: dict):
         raise HTTPException(400, str(exc))
     try:
         run_id = stress.start(cfg)
-    except ValueError as exc:            # 场景校验失败
+    except ValueError as exc:            # 数据集/参数校验失败
         raise HTTPException(400, str(exc))
-    except RuntimeError as exc:          # llm-grill 不可用
+    except RuntimeError as exc:          # evalscope 不可用
         raise HTTPException(503, str(exc))
     _save_stress_last_cfg(cfg, payload)
     return JSONResponse({"run_id": run_id})
@@ -411,18 +388,19 @@ def stress_records(run_id: str, limit: int = 200, only_errors: bool = False):
 def stress_series(run_id: str, buckets: int = 60):
     if not stress.get(run_id):
         raise HTTPException(404, "任务不存在")
-    return JSONResponse({"points": grill_core.series(stress.records(run_id), buckets)})
+    return JSONResponse({"points": perf_core.series(stress.records(run_id), buckets)})
 
 
-@app.get("/api/stress/runs/{run_id}/scenario")
-def stress_scenario(run_id: str):
-    """返回场景 YAML 原文（api_key 已脱敏，原文位于任务目录下的 scenario.yaml）。"""
-    path = stress.scenario_path(run_id)
-    if not path:
-        raise HTTPException(404, "场景文件不存在")
-    with open(path, encoding="utf-8") as f:
-        text = f.read()
-    return JSONResponse({"text": _mask_scenario(text), "path": path})
+@app.get("/api/stress/runs/{run_id}/args")
+def stress_args(run_id: str):
+    """返回本次运行参数与 evalscope 命令（api_key 已脱敏；原文见任务目录 args.json）。"""
+    snap = stress.get(run_id)
+    if not snap:
+        raise HTTPException(404, "任务不存在")
+    if not snap.get("args_text"):
+        raise HTTPException(404, "运行参数不存在")
+    return JSONResponse({"text": snap["args_text"],
+                         "path": stress.args_path(run_id) or ""})
 
 
 @app.post("/api/stress/runs/{run_id}/stop")
@@ -448,10 +426,10 @@ def _stress_csv_path(run_id):
     path = os.path.join(stress.base, run_id, "results.csv")
     with open(path, "w", newline="", encoding="utf-8-sig") as f:
         writer = csv.writer(f)
-        writer.writerow(grill_core.CSV_HEADER)
+        writer.writerow(perf_core.CSV_HEADER)
         for rec in records:
             writer.writerow(["" if v is None else v
-                             for v in grill_core.row_for_csv(rec)])
+                             for v in perf_core.row_for_csv(rec)])
     return path, len(records)
 
 
@@ -512,7 +490,7 @@ def spa(path: str):
 # ---------------------------------------------------------------- 启动
 def main():
     parser = argparse.ArgumentParser(
-        description="{}：精度测试 + llm-grill 压力测试 Web 服务".format(appconfig.APP_TITLE))
+        description="{}：精度测试 + evalscope 压力测试 Web 服务".format(appconfig.APP_TITLE))
     parser.add_argument("--host", default=os.environ.get("HOST", "0.0.0.0"))
     parser.add_argument("--port", type=int, default=int(os.environ.get("PORT", "8000")))
     parser.add_argument("--reload", action="store_true", help="开发模式自动重载")
@@ -522,8 +500,8 @@ def main():
     print("前端产物: {} ({})".format(WEBUI_DIR,
                                   "已构建" if os.path.isfile(
                                       os.path.join(WEBUI_DIR, "index.html")) else "未构建"))
-    info = grill_core.probe(force=True)
-    print("llm-grill: {} ({})".format(
+    info = perf_core.probe(force=True)
+    print("evalscope: {} ({})".format(
         "可用 " + str(info["version"]) if info["available"] else "不可用",
         info["path"] or info["error"]))
     print("服务地址: http://{}:{}".format(args.host if args.host != "0.0.0.0" else "127.0.0.1",

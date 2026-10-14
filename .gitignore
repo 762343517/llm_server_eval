@@ -9,6 +9,7 @@ __pycache__/
 frontend/node_modules/
 frontend/.vite/
 frontend/dist/
+.venv
 
 # 前端构建产物由 FastAPI 托管，如需部署到无 Node 环境的机器可直接提交；
 # 若团队约定不提交产物，取消下面一行注释即可。

@@ -1,9 +1,10 @@
-"""llm-grill 压测任务管理：状态跟踪、实时进度、持久化、结果导出。
+"""EvalScope 压测任务管理：状态跟踪、实时进度、持久化、结果导出。
 
 任务目录 runs/stress/<run_id>/：
-  meta.json      任务快照（状态 / 实时指标 / 汇总 / 日志），api_key 已脱敏
-  scenario.yaml  交给 llm-grill 的场景文件（含密钥，权限 600）
-  results.jsonl  llm-grill 的逐请求结果，边跑边落盘，可通过 tail 获取实时进度
+  meta.json     任务快照（状态 / 实时指标 / 汇总 / 日志），api_key 已脱敏
+  dataset.jsonl 交给 evalscope 的自定义数据集（每行一条会话 messages）
+  args.json     本次运行参数与完整命令（含密钥，权限 600，展示时已脱敏）
+  perf/         evalscope 的产物目录：各并发档位下 benchmark_data.db（逐行提交，可边跑边读）
 
 与精度测试的 RunManager 保持同一套约定（快照字段、中断标记、删除语义），
 前端两个 Tab 因此可复用同一批组件。
@@ -17,15 +18,41 @@ import threading
 import time
 from collections import deque
 
-import grill_core
+import perf_core
 import run_manager as rm
 
 STRESS_SUBDIR = "stress"
 LAST_CFG = ".last_stress_config.json"
+ARGS_NAME = "args.json"
+DATASET_NAME = "dataset.jsonl"
 MAX_LOGS = 200
 MAX_RECORDS = 200000            # 内存中保留的明细上限，防止超长压测占满内存
 STATUS_TEXT = {"running": "压测中", "succeeded": "已完成", "failed": "失败",
                "stopped": "已停止", "interrupted": "已中断"}
+MASK = "***"
+
+
+def _redact(cmd):
+    """命令行中的 api_key 脱敏后再写日志。"""
+    out = list(cmd)
+    for i, item in enumerate(out):
+        if item == "--api-key" and i + 1 < len(out):
+            out[i + 1] = MASK
+    return out
+
+
+def _mask_text(text):
+    """args.json 中的密钥脱敏（展示用）。"""
+    try:
+        data = json.loads(text)
+    except ValueError:
+        return text
+    if data.get("api_key"):
+        data["api_key"] = MASK
+    cmd = data.get("command")
+    if isinstance(cmd, list):
+        data["command"] = _redact(cmd)
+    return json.dumps(data, ensure_ascii=False, indent=2) + "\n"
 
 
 class StressRun:
@@ -36,8 +63,8 @@ class StressRun:
         self.cfg = dict(cfg)
         self.dir = os.path.join(base_dir, run_id)
         self.meta_path = os.path.join(self.dir, "meta.json")
-        self.scenario_path = os.path.join(self.dir, "scenario.yaml")
-        self.result_path = os.path.join(self.dir, "results.jsonl")
+        self.args_path = os.path.join(self.dir, ARGS_NAME)
+        self.dataset_path = os.path.join(self.dir, DATASET_NAME)
         self.lock = threading.RLock()
         self.stop_event = threading.Event()
         self.deleted = False
@@ -48,15 +75,17 @@ class StressRun:
         self.started_at = time.time()
         self.finished_at = None
         self.logs = deque(maxlen=MAX_LOGS)
-        self.progress = {"stage": "准备中", "text": "正在生成场景文件", "pct": 0.0}
+        self.progress = {"stage": "准备中", "text": "正在生成数据集", "pct": 0.0}
         self.records = []
-        self.stats = grill_core.aggregate([])
+        self.stats = perf_core.aggregate([])
         self.summary = None
         self.conv = None
         self.by_level = []
-        self.scenario_text = None
-        self.expected = grill_core.expected_requests(cfg)
+        self.args_text = None
+        self.expected = perf_core.expected_requests(cfg)
+        self._cursor = {}                # {db_path: 已读取行数}，增量读取用
         self._last_agg = 0.0
+        self._last_read = 0.0
         self._last_save = 0.0
 
     # ---------------------------------------------------------------- 基础
@@ -66,7 +95,7 @@ class StressRun:
                               "msg": "{}".format(msg)[:600]})
 
     def _safe_cfg(self):
-        """快照中的配置：密钥脱敏（原文仅保留在 scenario.yaml 与 last_config 中）。"""
+        """快照中的配置：密钥脱敏（原文仅保留在 args.json 与 last_config 中）。"""
         safe = dict(self.cfg)
         if safe.get("api_key"):
             safe["api_key"] = rm.mask_secret(safe["api_key"])
@@ -93,6 +122,7 @@ class StressRun:
             snap = {
                 "run_id": self.run_id,
                 "kind": "stress",
+                "engine": "evalscope",
                 "status": self.status,
                 "status_text": STATUS_TEXT.get(self.status, self.status),
                 "phase": self.phase,
@@ -111,8 +141,8 @@ class StressRun:
                 "summary": self.summary,
                 "conv": self.conv,
                 "by_level": self.by_level,
-                "scenario_text": self.scenario_text,
-                "result_exists": os.path.isfile(self.result_path),
+                "args_text": _mask_text(self.args_text) if self.args_text else None,
+                "result_exists": os.path.isdir(self.dir),
             }
             if include_logs:
                 snap["logs"] = list(self.logs)
@@ -125,8 +155,8 @@ class StressRun:
         if not force and now - self._last_agg < 0.5:
             return False
         self._last_agg = now
-        self.stats = grill_core.aggregate(self.records)
-        self.by_level = grill_core.by_level(self.records)
+        self.stats = perf_core.aggregate(self.records)
+        self.by_level = perf_core.by_level(self.records)
         done = len(self.records)
         pct = min(100.0, done / self.expected * 100.0) if self.expected else 0.0
         level = int(self.stats.get("concurrent_level") or 0)
@@ -146,42 +176,39 @@ class StressRun:
             self._last_save = now
             self.save()
 
-    def _read_new(self, pos):
-        """从 results.jsonl 的 pos 位置读取增量（仅消费完整行），返回新位置。"""
-        if not os.path.isfile(self.result_path):
-            return pos
+    def _read_new(self, force=False):
+        """从 evalscope 的 SQLite 结果库增量读取新完成的请求。"""
+        now = time.time()
+        if not force and now - self._last_read < 0.5:
+            return
+        self._last_read = now
         try:
-            with open(self.result_path, "rb") as f:
-                f.seek(pos)
-                chunk = f.read()
-        except OSError:
-            return pos
-        if not chunk:
-            return pos
-        lines = chunk.split(b"\n")
-        tail = lines.pop()                       # 最后一段可能尚未写完
-        consumed = len(chunk) - len(tail)
-        parsed = [rec for rec in (grill_core.parse_line(x) for x in lines) if rec]
-        if parsed:
-            with self.lock:
-                if len(self.records) < MAX_RECORDS:
-                    self.records.extend(parsed)
-            if self._recompute():
-                self._maybe_save()
-        return pos + consumed
+            parsed, self._cursor = perf_core.read_records(
+                self.dir, self.cfg, self.run_id, after=self._cursor)
+        except Exception as exc:  # noqa: BLE001
+            self.log("[读取] 结果库暂不可读：{}".format(exc))
+            return
+        if not parsed:
+            return
+        with self.lock:
+            room = MAX_RECORDS - len(self.records)
+            if room > 0:
+                self.records.extend(parsed[:room])
+        if self._recompute():
+            self._maybe_save()
 
     def _pump_stdout(self, proc):
-        """将 llm-grill 的输出写入任务日志。"""
+        """将 evalscope 的输出写入任务日志。"""
         try:
             for line in proc.stdout:
                 line = line.strip()
                 if line:
-                    self.log("[llm-grill] " + line[:400])
+                    self.log("[evalscope] " + line[:400])
         except Exception:  # noqa: BLE001
             pass
 
     def _terminate(self, proc):
-        """终止 llm-grill 子进程（含其进程组）。"""
+        """终止 evalscope 子进程（含其进程组）。"""
         if proc is None or proc.poll() is not None:
             return
         for sig, wait in ((signal.SIGTERM, 5), (signal.SIGKILL, 3)):
@@ -200,24 +227,21 @@ class StressRun:
 
     # ---------------------------------------------------------------- 主流程
     def worker(self):
-        """后台线程：写入场景文件 → 启动 llm-grill → 边跑边读取结果 → 收尾并确定状态。"""
+        """后台线程：生成数据集 → 启动 evalscope → 边跑边读结果 → 收尾并确定状态。"""
         rc = None
         error = None
         try:
-            scenario = grill_core.build_scenario(self.cfg)
-            text = grill_core.dump_scenario(scenario)
             os.makedirs(self.dir, exist_ok=True)
-            with open(self.scenario_path, "w", encoding="utf-8") as f:
+            perf_core.build_dataset(self.cfg, self.dataset_path)
+            text = perf_core.dump_args(self.cfg, self.dir, self.dataset_path)
+            with open(self.args_path, "w", encoding="utf-8") as f:
                 f.write(text)
-            os.chmod(self.scenario_path, 0o600)
-            self.scenario_text = text
+            os.chmod(self.args_path, 0o600)
+            self.args_text = text
             self.save()
 
-            binary = grill_core.resolve_bin()
-            if not binary:
-                raise RuntimeError(grill_core.probe()["error"] or "未找到 llm-grill 可执行文件")
-            cmd = [binary, "run", self.scenario_path, "-o", self.result_path, "-q"]
-            self.log("[启动] " + " ".join(cmd))
+            cmd = perf_core.build_command(self.cfg, self.dir, self.dataset_path)
+            self.log("[启动] " + " ".join(_redact(cmd)))
             proc = subprocess.Popen(cmd, cwd=self.dir, stdout=subprocess.PIPE,
                                     stderr=subprocess.STDOUT, text=True, bufsize=1,
                                     start_new_session=True)
@@ -228,17 +252,16 @@ class StressRun:
                              "text": "0/{} 请求".format(self.expected), "pct": 0.0}
             self.save()
 
-            pos = 0
             while True:
-                pos = self._read_new(pos)
+                self._read_new()
                 if proc.poll() is not None:
-                    self._read_new(pos)
+                    self._read_new(force=True)
                     break
                 if self.stop_event.is_set():
-                    self.log("[停止] 收到停止指令，正在终止 llm-grill")
+                    self.log("[停止] 收到停止指令，正在终止 evalscope")
                     self._terminate(proc)
                     break
-                time.sleep(0.3)
+                time.sleep(0.5)
             rc = proc.wait()
         except Exception as exc:  # noqa: BLE001
             error = "{}: {}".format(type(exc).__name__, exc)
@@ -249,9 +272,9 @@ class StressRun:
     def _finalize(self, rc, error):
         """确定最终状态并生成汇总；即使失败也保留已完成的部分结果。"""
         with self.lock:
-            self.summary = grill_core.aggregate(self.records)
-            self.conv = grill_core.conversation_metrics(self.records)
-            self.by_level = grill_core.by_level(self.records)
+            self.summary = perf_core.aggregate(self.records)
+            self.conv = perf_core.conversation_metrics(self.records)
+            self.by_level = perf_core.by_level(self.records)
             if error:
                 self.status, self.error = "failed", error
             elif self.stop_event.is_set():
@@ -259,10 +282,10 @@ class StressRun:
                 self.error = "已手动停止"
             elif rc not in (0, None):
                 self.status = "failed"
-                self.error = "llm-grill 退出码 {}，请查看日志".format(rc)
+                self.error = "evalscope 退出码 {}，请查看日志".format(rc)
             elif not self.records:
                 self.status = "failed"
-                self.error = "llm-grill 未产出任何请求结果，请检查场景与端点"
+                self.error = "evalscope 未产出任何请求结果，请检查端点与模型名"
             elif self.summary["success_count"] == 0:
                 self.status = "failed"
                 first = (self.summary["errors"] or [{}])[0].get("message", "")
@@ -298,14 +321,14 @@ class StressManager:
     def start(self, cfg):
         """校验配置并后台启动一次压测，返回 run_id。"""
         cfg = dict(cfg)
-        grill_core.build_scenario(cfg)              # 校验失败时抛出 ValueError，由调用方转为 400
-        info = grill_core.probe()
+        perf_core.build_dataset(cfg, os.devnull)  # 校验失败时抛 ValueError，由调用方转 400
+        info = perf_core.probe()
         if not info["available"]:
-            raise RuntimeError(info["error"] or "llm-grill 不可用")
+            raise RuntimeError(info["error"] or "evalscope 不可用")
         run_id = rm.new_run_id()
-        cfg["run_id"] = run_id              # 使 llm-grill 的结果中带上本平台的任务号
+        cfg["run_id"] = run_id              # 使结果中带上本平台的任务号
         state = StressRun(run_id, cfg, self.base)
-        state.log("[准备] 正在生成 llm-grill 场景文件")
+        state.log("[准备] 正在生成 evalscope 数据集")
         with self._lock:
             self._states[run_id] = state
         state.save()
@@ -352,20 +375,25 @@ class StressManager:
     @staticmethod
     def _brief(snap):
         """列表使用精简快照：移除大字段。"""
-        for key in ("scenario_text", "logs", "by_level", "conv"):
+        for key in ("args_text", "logs", "by_level", "conv"):
             snap.pop(key, None)
         return snap
 
     def records(self, run_id):
-        """读取磁盘上的逐请求结果（运行中也可安全读取，llm-grill 每条结果即时 flush）。"""
+        """读取磁盘上的逐请求结果（运行中也可安全读取，evalscope 逐行提交结果库）。"""
         if not rm.RUN_ID_RE.match(run_id or ""):
             return []
-        return grill_core.load_records(os.path.join(self.base, run_id, "results.jsonl"))
+        run_dir = os.path.join(self.base, run_id)
+        with self._lock:
+            state = self._states.get(run_id)
+        cfg = state.cfg if state is not None else {}
+        records, _ = perf_core.read_records(run_dir, cfg, run_id)
+        return records
 
-    def scenario_path(self, run_id):
+    def args_path(self, run_id):
         if not rm.RUN_ID_RE.match(run_id or ""):
             return None
-        path = os.path.join(self.base, run_id, "scenario.yaml")
+        path = os.path.join(self.base, run_id, ARGS_NAME)
         return path if os.path.isfile(path) else None
 
     # ---------------------------------------------------------------- 控制
@@ -399,7 +427,7 @@ class StressManager:
         return existed
 
     def cancel_all(self):
-        """服务退出时终止所有运行中的压测（llm-grill 为独立进程，必须显式收尾）。"""
+        """服务退出时终止所有运行中的压测（evalscope 为独立进程，必须显式收尾）。"""
         with self._lock:
             states = list(self._states.values())
         for state in states:

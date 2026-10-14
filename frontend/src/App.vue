@@ -12,12 +12,10 @@ const activeTab = computed(() => {
   return ''
 })
 
-const grill = computed(() => store.grill)
-const grillText = computed(() => {
-  if (!grill.value.path) return 'llm-grill 未安装'
-  return grill.value.available
-    ? `llm-grill ${grill.value.version || '可用'}`
-    : 'llm-grill 不可用'
+const evalscope = computed(() => store.evalscope)
+const evalscopeText = computed(() => {
+  if (evalscope.value.available) return `evalscope ${evalscope.value.version || '可用'}`
+  return evalscope.value.path ? 'evalscope 不可用' : 'evalscope 未安装'
 })
 </script>
 
@@ -36,10 +34,10 @@ const grillText = computed(() => {
       </RouterLink>
       <span
         class="meta-chip"
-        :class="grill.available ? 'ok' : 'bad'"
-        :title="grill.error || grill.path || ''"
+        :class="evalscope.available ? 'ok' : 'bad'"
+        :title="evalscope.error || evalscope.path || ''"
       >
-        {{ grillText }}
+        {{ evalscopeText }}
       </span>
     </nav>
   </header>
