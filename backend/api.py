@@ -22,6 +22,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, BASE_DIR)
 
 import appconfig      # noqa: E402
+import consts         # noqa: E402
 import csvview        # noqa: E402
 import eval_core      # noqa: E402
 import grill_core     # noqa: E402
@@ -162,8 +163,9 @@ def _accuracy_cfg(payload):
     judge_api_key = judge_api_key_raw or api_key
     if not os.path.exists(data):
         raise HTTPException(400, "数据集不存在: {}".format(data))
-    max_tokens = _int(payload.get("max_tokens"), 32768)
-    max_tokens_cap = max(_int(payload.get("max_tokens_cap"), 65536), max_tokens)
+    max_tokens = _int(payload.get("max_tokens"), consts.DEFAULT_MAX_TOKENS)
+    max_tokens_cap = max(_int(payload.get("max_tokens_cap"),
+                              consts.DEFAULT_MAX_TOKENS_CAP), max_tokens)
     thinking = payload.get("thinking") or ""
     reasoning_effort = payload.get("reasoning_effort") or ""
     judge_thinking = payload.get("judge_thinking") or ""
@@ -183,12 +185,16 @@ def _accuracy_cfg(payload):
         "thinking": thinking, "reasoning_effort": reasoning_effort,
         "judge_thinking": judge_thinking,
         "judge_reasoning_effort": judge_reasoning_effort,
-        "concurrency": max(1, _int(payload.get("concurrency"), 8)),
-        "judge_concurrency": max(1, _int(payload.get("judge_concurrency"), 8)),
-        "limit": max(0, _int(payload.get("limit"), 0)),
-        "seed": _int(payload.get("seed"), 0),
+        "concurrency": max(1, _int(payload.get("concurrency"),
+                                   consts.DEFAULT_CONCURRENCY)),
+        "judge_concurrency": max(1, _int(payload.get("judge_concurrency"),
+                                         consts.DEFAULT_JUDGE_CONCURRENCY)),
+        "limit": max(0, _int(payload.get("limit"), consts.DEFAULT_LIMIT)),
+        "seed": _int(payload.get("seed"), consts.DEFAULT_SEED),
         "max_tokens": max_tokens, "max_tokens_cap": max_tokens_cap,
-        "max_incomplete_attempts": max(1, _int(payload.get("max_incomplete_attempts"), 2)),
+        "max_incomplete_attempts": max(
+            1, _int(payload.get("max_incomplete_attempts"),
+                    consts.DEFAULT_MAX_INCOMPLETE_ATTEMPTS)),
     }
     # 表单默认值沿用「原样填写」的裁判端点/密钥，保留「留空 = 复用被测模型」的状态
     saved = {k: cfg[k] for k in appconfig.accuracy_defaults() if k in cfg}
@@ -312,16 +318,21 @@ def _stress_cfg(payload):
     cfg = {
         "name": (payload.get("name") or "stress").strip() or "stress",
         "description": (payload.get("description") or "").strip(),
-        "backend_name": (payload.get("backend_name") or "target").strip() or "target",
-        "backend_type": (payload.get("backend_type") or "openai").strip(),
+        "backend_name": ((payload.get("backend_name")
+                          or consts.DEFAULT_STRESS_BACKEND_NAME).strip()
+                         or consts.DEFAULT_STRESS_BACKEND_NAME),
+        "backend_type": (payload.get("backend_type")
+                         or consts.DEFAULT_STRESS_BACKEND_TYPE).strip(),
         "endpoint": (payload.get("endpoint") or "").strip(),
         "api_key": (payload.get("api_key") or "").strip(),
         "model": (payload.get("model") or "").strip(),
         "max_tokens": max(1, _capped(payload.get("max_tokens"), "max_tokens", "max_tokens")),
-        "temperature": _float(payload.get("temperature"), 0.0),
-        "top_p": _float(payload.get("top_p"), 1.0),
-        "top_k": _int(payload.get("top_k"), -1),
-        "timeout": max(1.0, min(_float(payload.get("timeout"), 120.0),
+        "temperature": _float(payload.get("temperature"),
+                              consts.DEFAULT_STRESS_TEMPERATURE),
+        "top_p": _float(payload.get("top_p"), consts.DEFAULT_STRESS_TOP_P),
+        "top_k": _int(payload.get("top_k"), consts.DEFAULT_STRESS_TOP_K),
+        "timeout": max(1.0, min(_float(payload.get("timeout"),
+                                      consts.DEFAULT_STRESS_TIMEOUT),
                                 STRESS_CAPS["timeout"])),
         "system_prompt": (payload.get("system_prompt") or "").strip(),
         "prompt": (payload.get("prompt") or "").strip(),
@@ -336,8 +347,10 @@ def _stress_cfg(payload):
         "think_time_seconds": max(0.0, min(_float(payload.get("think_time_seconds"), 0.0),
                                           STRESS_CAPS["think_time_seconds"])),
         "ramp_levels": levels,
-        "ramp_pause_seconds": max(0.0, min(_float(payload.get("ramp_pause_seconds"), 10.0),
-                                          STRESS_CAPS["ramp_pause_seconds"])),
+        "ramp_pause_seconds": max(0.0, min(
+            _float(payload.get("ramp_pause_seconds"),
+                   consts.DEFAULT_STRESS_RAMP_PAUSE_SECONDS),
+            STRESS_CAPS["ramp_pause_seconds"])),
     }
     if cfg["temperature"] < 0 or cfg["temperature"] > 2:
         raise ValueError("temperature 需在 0~2 之间")

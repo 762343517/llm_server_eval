@@ -108,37 +108,40 @@ def main():
     ap.add_argument("--judge-model", required=True)
     ap.add_argument("--endpoint", default=DEFAULT_ENDPOINT)
     ap.add_argument("--api-key", default=DEFAULT_API_KEY)
-    ap.add_argument("--judge-endpoint", default="",
+    ap.add_argument("--judge-endpoint", default=consts.DEFAULT_JUDGE_ENDPOINT,
                     help="裁判模型端点；留空则复用 --endpoint")
-    ap.add_argument("--judge-api-key", default="",
+    ap.add_argument("--judge-api-key", default=consts.DEFAULT_JUDGE_API_KEY,
                     help="裁判模型密钥；留空则复用 --api-key")
     ap.add_argument("--data", default=eval_core.DEFAULT_DATA,
                     help="数据集路径：.csv 按 SimpleQA 结构，.parquet 按 HLE 结构")
     ap.add_argument("--thinking", dest="thinking", action="store_const",
-                    const="enabled", default="",
+                    const="enabled", default=consts.DEFAULT_THINKING,
                     help="被测模型开启思考（默认不传该字段，由服务端决定）")
     ap.add_argument("--no-thinking", dest="thinking", action="store_const",
                     const="disabled", help="被测模型关闭思考")
-    ap.add_argument("--reasoning-effort", default="",
+    ap.add_argument("--reasoning-effort", default=consts.DEFAULT_REASONING_EFFORT,
                     choices=list(eval_core.EFFORT_CHOICES),
                     help="被测模型思考强度；仅开启思考时生效（默认不传）")
-    ap.add_argument("--concurrency", type=int, default=8)
-    ap.add_argument("--judge-concurrency", type=int, default=8)
+    ap.add_argument("--concurrency", type=int, default=consts.DEFAULT_CONCURRENCY)
+    ap.add_argument("--judge-concurrency", type=int,
+                    default=consts.DEFAULT_JUDGE_CONCURRENCY)
     ap.add_argument("--judge-thinking", dest="judge_thinking",
-                    action="store_const", const="enabled", default="",
+                    action="store_const", const="enabled",
+                    default=consts.DEFAULT_THINKING,
                     help="裁判模型开启思考（默认不传该字段）")
     ap.add_argument("--no-judge-thinking", dest="judge_thinking",
                     action="store_const", const="disabled",
                     help="裁判模型关闭思考，判分更快更省 token")
-    ap.add_argument("--judge-reasoning-effort", default="",
+    ap.add_argument("--judge-reasoning-effort", default=consts.DEFAULT_REASONING_EFFORT,
                     choices=list(eval_core.EFFORT_CHOICES),
                     help="裁判模型思考强度；仅开启思考时生效（默认不传）")
-    ap.add_argument("--limit", type=int, default=0)
-    ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--max-tokens", type=int, default=32768,
+    ap.add_argument("--limit", type=int, default=consts.DEFAULT_LIMIT)
+    ap.add_argument("--seed", type=int, default=consts.DEFAULT_SEED)
+    ap.add_argument("--max-tokens", type=int, default=consts.DEFAULT_MAX_TOKENS,
                     help="首轮生成上限；思考模式截断时会自动翻倍重试")
-    ap.add_argument("--max-tokens-cap", type=int, default=65536)
-    ap.add_argument("--max-incomplete-attempts", type=int, default=2,
+    ap.add_argument("--max-tokens-cap", type=int, default=consts.DEFAULT_MAX_TOKENS_CAP)
+    ap.add_argument("--max-incomplete-attempts", type=int,
+                    default=consts.DEFAULT_MAX_INCOMPLETE_ATTEMPTS,
                     help="同一题被反复判定截断后放弃重做的次数")
     ap.add_argument("--out", required=True)
     args = ap.parse_args()
