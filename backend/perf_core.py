@@ -19,6 +19,7 @@ import os
 import random
 import re
 import shutil
+import socket
 import sqlite3
 import statistics
 import string
@@ -41,6 +42,9 @@ DB_COMMIT_INTERVAL = 1
 UNIQUE_PREFIX_CHARS = 1024
 # 单条 prompt 的长度上限（字符，evalscope 默认值）
 MAX_PROMPT_LENGTH = 131072
+# 启动前目标连通性预检的超时（秒）：只做一次 TCP 握手，不发 HTTP、不消耗 token。
+# 用于在 evalscope 的 connect_test 之前给出结论，避免地址填错时白等 --total-timeout。
+PRECHECK_TIMEOUT = 3.0
 
 _PROBE = {"at": 0.0, "info": None}
 _PROBE_TTL = 60.0
@@ -120,6 +124,46 @@ def normalize_endpoint(endpoint):
     else:
         path = path + "/chat/completions"         # /v1、/api/xxx/v4 等前缀：只补后缀
     return "{}://{}{}".format(parts.scheme, parts.netloc, path)
+
+
+class TargetUnreachable(RuntimeError):
+    """压测目标不可达（连接被拒 / 超时 / 域名解析失败）。"""
+
+
+def precheck_target(endpoint, timeout=PRECHECK_TIMEOUT):
+    """启动前预检目标可达性，返回 (ok, message)。
+
+    只做一次 TCP 握手：不发 HTTP 请求、不消耗 token、不在目标服务留下业务记录。
+    连接被拒 / 超时 / 域名解析失败都能即刻给出结论，省掉 evalscope connect_test
+    等满 `--total-timeout` 的时间（连不上时它会一直等到超时）。
+    """
+    try:
+        url = normalize_endpoint(endpoint)
+    except ValueError as exc:
+        return False, str(exc)
+    parts = urlsplit(url)
+    host = parts.hostname or ""
+    try:
+        port = parts.port
+    except ValueError:
+        return False, "端口号不合法：{}".format(endpoint)
+    port = port or (443 if parts.scheme == "https" else 80)
+    target = "{}:{}".format(host, port)
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True, ""
+    except socket.gaierror as exc:
+        return False, "无法解析域名 {}：{}".format(host, exc)
+    except socket.timeout:
+        return False, ("连接 {} 超时（{} 秒）：目标服务未启动、端口不通或网络不可达"
+                       .format(target, timeout))
+    except ConnectionRefusedError:
+        return False, ("{} 拒绝连接：该端口没有服务在监听，请确认目标服务已启动、"
+                       "地址与端口填写正确".format(target))
+    except ConnectionResetError:
+        return False, "{} 连接被重置，可能被防火墙或代理拦截".format(target)
+    except OSError as exc:
+        return False, "无法连接 {}：{}".format(target, exc)
 
 
 def conversation_messages(cfg):
@@ -207,7 +251,7 @@ def build_command(cfg, run_dir, dataset_path):
         "--model", model,
         "--url", normalize_endpoint(cfg.get("endpoint")),
         "--dataset", DATASET_NAME,
-        "--dataset-path", str(dataset_path),
+        "--dataset-path", os.path.abspath(str(dataset_path)),
         "--multi-turn",
         "--max-turns", str(max(1, int(cfg.get("turns") or 1))),
         "--number", *[str(n) for n in numbers],
@@ -221,7 +265,7 @@ def build_command(cfg, run_dir, dataset_path):
         "--total-timeout", str(max(1, int(float(cfg.get("timeout") or 120)))),
         "--max-prompt-length", str(MAX_PROMPT_LENGTH),
         "--db-commit-interval", str(DB_COMMIT_INTERVAL),
-        "--outputs-dir", str(run_dir),
+        "--outputs-dir", os.path.abspath(str(run_dir)),
         "--name", RUN_NAME,
         "--no-timestamp",
     ]
@@ -253,7 +297,7 @@ def dump_args(cfg, run_dir, dataset_path):
                    for u in levels(cfg)],
         "sleep_interval": cfg.get("ramp_pause_seconds"),
         "expected_requests": expected_requests(cfg),
-        "dataset_path": str(dataset_path),
+        "dataset_path": os.path.abspath(str(dataset_path)),
         "api_key": "***" if (cfg.get("api_key") or "").strip() else "",
     }, ensure_ascii=False, indent=2) + "\n"
 

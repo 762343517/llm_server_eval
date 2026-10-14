@@ -358,6 +358,8 @@ def stress_start(payload: dict):
         raise HTTPException(400, str(exc))
     try:
         run_id = stress.start(cfg)
+    except perf_core.TargetUnreachable as exc:  # 启动前预检：目标不可达
+        raise HTTPException(400, str(exc))
     except ValueError as exc:            # 数据集/参数校验失败
         raise HTTPException(400, str(exc))
     except RuntimeError as exc:          # evalscope 不可用
@@ -405,7 +407,11 @@ def stress_args(run_id: str):
 
 @app.post("/api/stress/runs/{run_id}/stop")
 def stress_stop(run_id: str):
-    if not stress.stop(run_id):
+    try:
+        stopped = stress.stop(run_id)
+    except RuntimeError as exc:          # 残留进程未能终止
+        raise HTTPException(500, str(exc))
+    if not stopped:
         raise HTTPException(404, "任务不存在或未在运行")
     return JSONResponse({"ok": True})
 

@@ -30,6 +30,9 @@ MAX_RECORDS = 200000            # 内存中保留的明细上限，防止超长�
 STATUS_TEXT = {"running": "压测中", "succeeded": "已完成", "failed": "失败",
                "stopped": "已停止", "interrupted": "已中断"}
 MASK = "***"
+PROC_NAME = "proc.json"          # 运行中的进程组信息，后端重启后据此接管残留进程
+TERM_STEPS = ((signal.SIGTERM, 2.0), (signal.SIGKILL, 3.0))
+POLL_STEP = 0.1
 
 
 def _redact(cmd):
@@ -55,6 +58,170 @@ def _mask_text(text):
     return json.dumps(data, ensure_ascii=False, indent=2) + "\n"
 
 
+def _proc_cmdline(pid):
+    """读取进程命令行：用于确认待终止的进程确实属于本任务（防进程组号被复用）。"""
+    try:
+        with open("/proc/{}/cmdline".format(int(pid)), "rb") as f:
+            raw = f.read().decode("utf-8", "replace")
+    except (OSError, ValueError):
+        return ""
+    return raw.replace("\0", " ").strip()
+
+
+def _pid_alive(pid):
+    """进程是否存在。"""
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return False
+    if pid <= 1:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:                     # 权限不足等：视为存活，避免漏杀
+        return True
+    return True
+
+
+def _group_pids(pgid):
+    """扫描 /proc，返回进程组内仍在运行的进程号（僵尸进程不算存活）。
+
+    不能直接用 os.killpg(pgid, 0) 判断：已退出但尚未回收的僵尸仍会让它成功，
+    导致终止流程误判为"没杀掉"而白等到超时。
+    """
+    pids = []
+    if not pgid or pgid <= 1:
+        return pids
+    try:
+        names = os.listdir("/proc")
+    except OSError:
+        return pids
+    for name in names:
+        if not name.isdigit():
+            continue
+        try:
+            with open("/proc/{}/stat".format(name), "rb") as f:
+                data = f.read().decode("utf-8", "replace")
+        except OSError:
+            continue
+        try:
+            tail = data.rsplit(") ", 1)[1].split()
+            state, pgrp = tail[0], int(tail[2])
+        except (IndexError, ValueError):
+            continue
+        if pgrp == pgid and state not in ("Z", "X", "x"):
+            pids.append(int(name))
+    return pids
+
+
+def _group_alive(pgid):
+    """进程组内是否仍有存活进程。"""
+    return bool(_group_pids(pgid))
+
+
+def kill_group(pgid, hint=""):
+    """终止整个进程组：SIGTERM → 等待 → SIGKILL → 等待，返回是否已确认全部退出。
+
+    evalscope 以独立会话（start_new_session）启动，因此组号即其主进程号；
+    hint 取任务目录名（evalscope 命令行里必然包含它），只有当 /proc/<pgid>/cmdline
+    命中时才动手，避免组号被复用后误杀无关进程。
+    """
+    if not pgid or pgid <= 1:
+        return True
+    cmdline = _proc_cmdline(pgid)
+    if cmdline and hint and hint not in cmdline:
+        return True                     # 组号已被别的进程占用，不能杀
+    for sig, wait in TERM_STEPS:
+        if not _group_alive(pgid):
+            return True
+        try:
+            os.killpg(pgid, sig)
+        except OSError:
+            return not _group_alive(pgid)
+        deadline = time.time() + wait
+        while time.time() < deadline:
+            if not _group_alive(pgid):
+                return True
+            time.sleep(POLL_STEP)
+    return not _group_alive(pgid)
+
+
+def proc_path(run_dir):
+    return os.path.join(run_dir, PROC_NAME)
+
+
+def load_proc(run_dir):
+    """读取任务落盘的进程组信息；不可用时返回 None。"""
+    try:
+        with open(proc_path(run_dir), encoding="utf-8") as f:
+            info = json.load(f)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(info, dict):
+        return None
+    for key in ("pgid", "pid", "server_pid"):
+        try:
+            info[key] = int(info.get(key) or 0)
+        except (TypeError, ValueError):
+            return None
+    return info
+
+
+def save_proc(run_dir, info):
+    try:
+        os.makedirs(run_dir, exist_ok=True)
+        tmp = proc_path(run_dir) + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(info, f, ensure_ascii=False, indent=2)
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, proc_path(run_dir))
+    except OSError:
+        pass
+
+
+def remove_proc(run_dir):
+    try:
+        os.remove(proc_path(run_dir))
+    except OSError:
+        pass
+
+
+def patch_meta(run_dir, status, error):
+    """把磁盘快照收敛到终态（服务重启后接管残留任务时使用）。"""
+    path = os.path.join(run_dir, "meta.json")
+    try:
+        with open(path, encoding="utf-8") as f:
+            snap = json.load(f)
+    except (OSError, ValueError):
+        return False
+    if snap.get("status") != "running":
+        return False
+    now = time.time()
+    total = (snap.get("stats") or {}).get("total_requests") or 0
+    snap["status"] = status
+    snap["status_text"] = STATUS_TEXT.get(status, status)
+    snap["phase"] = "done"
+    snap["error"] = error
+    snap["finished_at"] = now
+    snap["finished_at_str"] = rm.fmt_time(now)
+    snap["duration_s"] = round(now - (snap.get("started_at") or now), 1)
+    snap["progress"] = {"stage": STATUS_TEXT.get(status, status),
+                        "text": "{} 请求完成".format(total), "pct": 100.0}
+    logs = snap.get("logs")
+    if isinstance(logs, list):
+        logs.append({"t": rm.fmt_time(now), "msg": "[停止] " + error})
+    tmp = path + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(snap, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, path)
+    except OSError:
+        return False
+    return True
+
+
 class StressRun:
     """一次压测任务的全部状态（内存 + 磁盘）。"""
 
@@ -69,6 +236,7 @@ class StressRun:
         self.stop_event = threading.Event()
         self.deleted = False
         self.proc = None
+        self.pgid = None                 # 子进程所属进程组（独立会话，组号=子进程号）
         self.status = "running"
         self.phase = "init"
         self.error = None
@@ -207,23 +375,23 @@ class StressRun:
         except Exception:  # noqa: BLE001
             pass
 
-    def _terminate(self, proc):
-        """终止 evalscope 子进程（含其进程组）。"""
-        if proc is None or proc.poll() is not None:
-            return
-        for sig, wait in ((signal.SIGTERM, 5), (signal.SIGKILL, 3)):
+    def _terminate(self, proc=None):
+        """终止 evalscope 进程组，返回是否已确认全部退出。
+
+        按组号收尾而不是看 proc.poll()：主进程退出后，组内仍可能有派生进程
+        继续打流量；组号取自句柄，句柄丢失时退回落盘的 pgid。
+        """
+        proc = proc if proc is not None else self.proc
+        pgid = proc.pid if proc is not None else self.pgid
+        if not pgid:
+            return True
+        ok = kill_group(pgid, self.run_id)
+        if proc is not None:
             try:
-                os.killpg(os.getpgid(proc.pid), sig)
+                proc.wait(timeout=5)     # 回收僵尸进程
             except Exception:  # noqa: BLE001
-                try:
-                    proc.terminate()
-                except Exception:  # noqa: BLE001
-                    pass
-            try:
-                proc.wait(timeout=wait)
-                return
-            except subprocess.TimeoutExpired:
-                continue
+                pass
+        return ok
 
     # ---------------------------------------------------------------- 主流程
     def worker(self):
@@ -246,6 +414,10 @@ class StressRun:
                                     stderr=subprocess.STDOUT, text=True, bufsize=1,
                                     start_new_session=True)
             self.proc = proc
+            self.pgid = proc.pid         # start_new_session=True：组号即子进程号
+            save_proc(self.dir, {"pid": proc.pid, "pgid": proc.pid,
+                                 "server_pid": os.getpid(),
+                                 "started_at": time.time()})
             threading.Thread(target=self._pump_stdout, args=(proc,), daemon=True).start()
             self.phase = "run"
             self.progress = {"stage": "压测中",
@@ -306,22 +478,31 @@ class StressRun:
                 self.summary["e2e_p95_s"]))
         self._last_save = 0.0
         self.save()
+        remove_proc(self.dir)            # 进程已收尾，不再需要被接管
 
 
 class StressManager:
     """压测任务池：启动、查询、停止、删除。"""
 
     def __init__(self, runs_dir=None):
-        self.base = os.path.join(runs_dir or rm.RUNS_DIR, STRESS_SUBDIR)
+        # 统一转绝对路径：evalscope 以任务目录为 cwd 启动，命令行里的相对路径会被
+        # 该 cwd 二次拼接（曾导致 --dataset-path 找不到文件、产物多套一层同名目录）
+        self.base = os.path.abspath(os.path.join(runs_dir or rm.RUNS_DIR,
+                                                 STRESS_SUBDIR))
         self._states = {}
         self._threads = {}
         self._lock = threading.Lock()
+        self._reap_orphans()
 
     # ---------------------------------------------------------------- 启动
     def start(self, cfg):
         """校验配置并后台启动一次压测，返回 run_id。"""
         cfg = dict(cfg)
         perf_core.build_dataset(cfg, os.devnull)  # 校验失败时抛 ValueError，由调用方转 400
+        # 预检目标可达性：地址/端口填错时立即失败，不必等 evalscope 的 connect_test 超时
+        ok, why = perf_core.precheck_target(cfg.get("endpoint"))
+        if not ok:
+            raise perf_core.TargetUnreachable(why)
         info = perf_core.probe()
         if not info["available"]:
             raise RuntimeError(info["error"] or "evalscope 不可用")
@@ -398,15 +579,73 @@ class StressManager:
 
     # ---------------------------------------------------------------- 控制
     def stop(self, run_id):
+        """停止任务，返回是否已停止；内存句柄丢失时按落盘的进程组接管。
+
+        服务重启后内存里不再有句柄，此时若只认内存，残留的 evalscope 进程就无人
+        能停（会一直对目标服务打流量），因此这里对磁盘上的运行中任务同样接管。
+        """
+        if not rm.RUN_ID_RE.match(run_id or ""):
+            return False
         with self._lock:
             state = self._states.get(run_id)
-        if state is None or state.deleted or state.status != "running":
+        if state is not None and not state.deleted:
+            if state.status != "running":
+                return False
+            state.log("[停止] 收到停止请求")
+            state.progress = {"stage": "停止中", "text": "正在终止 evalscope 进程",
+                              "pct": state.progress.get("pct") or 0.0}
+            state.stop_event.set()
+            state.save()
+            state._terminate(state.proc)
+            return True
+        return self._stop_from_disk(run_id)
+
+    def _stop_from_disk(self, run_id):
+        """接管磁盘上的运行中任务：终止 proc.json 中记录的进程组。"""
+        run_dir = os.path.join(self.base, run_id)
+        if not os.path.isfile(os.path.join(run_dir, "meta.json")):
             return False
-        state.log("[停止] 收到停止请求")
-        state.stop_event.set()
-        state._terminate(state.proc)
-        state.save()
+        info = load_proc(run_dir) or {}
+        pgid = info.get("pgid") or 0
+        if not _group_alive(pgid):
+            # 进程已不在，任务只留下了 running 快照，收敛为「已中断」
+            return patch_meta(run_dir, "interrupted", "服务重启，压测进程已不存在")
+        if not kill_group(pgid, run_id):
+            raise RuntimeError(
+                "无法终止残留的 evalscope 进程（进程组 {}），请手动 kill".format(pgid))
+        remove_proc(run_dir)
+        patch_meta(run_dir, "stopped", "已手动停止（服务重启后接管残留进程）")
         return True
+
+    def _reap_orphans(self):
+        """启动时收尾上次服务遗留的压测进程。
+
+        evalscope 以独立会话启动，服务进程被强杀时会变成孤儿继续打流量，表现为
+        「点了停止仍在跑」。这里按任务目录里的 proc.json 找到它们并终止，同时把
+        快照收敛为「已中断」；若进程属于另一个仍在运行的后端实例，则不动。
+        """
+        if not os.path.isdir(self.base):
+            return
+        for name in os.listdir(self.base):
+            if not rm.RUN_ID_RE.match(name):
+                continue
+            run_dir = os.path.join(self.base, name)
+            info = load_proc(run_dir)
+            try:
+                with open(os.path.join(run_dir, "meta.json"), encoding="utf-8") as f:
+                    status = (json.load(f) or {}).get("status")
+            except (OSError, ValueError):
+                status = None
+            owner = (info or {}).get("server_pid") or 0
+            if owner and owner != os.getpid() and _pid_alive(owner):
+                continue                 # 属于其它仍在运行的后端实例
+            pgid = (info or {}).get("pgid") or 0
+            if _group_alive(pgid) and not kill_group(pgid, name):
+                continue                 # 未能终止：保留 proc.json，留待下次再试
+            if status == "running":
+                patch_meta(run_dir, "interrupted", "服务重启导致压测中断")
+            if info is not None:
+                remove_proc(run_dir)
 
     def delete(self, run_id):
         """删除任务：先停止子进程，再连同目录一并清除。"""
@@ -431,7 +670,11 @@ class StressManager:
         with self._lock:
             states = list(self._states.values())
         for state in states:
-            if state.status == "running":
-                state.stop_event.set()
-                state._terminate(state.proc)
-                state.save()
+            if state.status != "running":
+                continue
+            state.stop_event.set()
+            state._terminate(state.proc)
+            state.save()
+            # 进程已终止，磁盘快照直接收敛为「已中断」，避免遗留一份"运行中"
+            patch_meta(state.dir, "interrupted", "服务退出导致压测中断")
+            remove_proc(state.dir)

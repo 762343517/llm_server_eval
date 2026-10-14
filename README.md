@@ -4,8 +4,8 @@
 包含两个 Tab：
 
 - **精度测试**：SimpleQA-Verified / HLE 数据集逐题作答 → LLM 裁判判分 → 汇总 Pass@1；
-- **压力测试**：调用 [llm-grill](https://pypi.org/project/llm-grill/) CLI 对被测服务并发压测，
-  实时展示吞吐、首字延迟、端到端延迟、阶梯并发对比与多轮 KV 缓存指标。
+- **压力测试**：调用 [EvalScope](https://evalscope.readthedocs.io/) 的 `evalscope perf`
+  对被测服务并发压测，实时展示吞吐、首字延迟、端到端延迟、阶梯并发对比与多轮上下文增长指标。
 
 ## 目录结构
 
@@ -18,8 +18,8 @@ zhipuEval
 │   ├── run_manager.py     # 精度测试任务管理（状态/进度/导出）
 │   ├── eval_core.py       # 数据集解析、生成、裁判、汇总
 │   ├── simpleqa_eval.py   # 精度测试命令行入口
-│   ├── grill_core.py      # llm-grill 场景生成、结果解析、指标聚合
-│   ├── grill_manager.py   # 压测任务管理（子进程/实时进度/导出）
+│   ├── perf_core.py       # EvalScope 集成：数据集生成、命令行构造、结果解析、指标聚合
+│   ├── perf_manager.py    # 压测任务管理（子进程/实时进度/导出）
 │   ├── csvview.py         # 工作区内 CSV 预览
 │   └── webui/             # 前端构建产物（由 Vite 生成，FastAPI 托管）
 ├── frontend/              # Vue3 + Vite 前端源码
@@ -27,7 +27,7 @@ zhipuEval
 ├── dataset/               # 数据集
 ├── runs/                  # 运行数据（已 gitignore）
 │   ├── <run_id>/          # 精度测试任务：meta.json / items.jsonl / results.csv
-│   └── stress/<run_id>/   # 压测任务：meta.json / scenario.yaml / results.jsonl
+│   └── stress/<run_id>/   # 压测任务：meta / dataset / args / proc.json / perf/
 └── endpoint.md            # 服务访问端点备忘
 ```
 
@@ -37,7 +37,8 @@ zhipuEval
 
 ```bash
 python3 -m pip install -r requirements.txt
-python3 backend/api.py --host 0.0.0.0 --port 8000      # 打印前端/llm-grill 自检信息
+python3 -m pip install 'evalscope[perf]'               # 压测引擎（可选，见「压力测试」）
+python3 backend/api.py --host 0.0.0.0 --port 8000      # 打印前端/evalscope 自检信息
 ```
 
 前端：仓库中 `backend/webui/` 已包含构建产物，按上述命令启动即可访问
@@ -76,57 +77,79 @@ HLE 中的带图题目（342 题）会自动以 OpenAI 多模态格式发送（`
 - 无效判定按「无效作答」处理：**不计入 Pass@1、拒答率、仅计作答等正确率类指标的分母**；
   token/时延等性能指标仍按全部记录统计。结果页对两类判定分别展示，可单独筛选。
 
-## 压力测试（llm-grill 集成）
+## 压力测试（EvalScope 集成）
 
 ### 依赖与识别
 
-压测通过 llm-grill 的**命令行**执行（子进程方式调用，不 import 其 Python 包，
-避免与本项目依赖混用导致版本冲突）：
+压测通过 [EvalScope](https://evalscope.readthedocs.io/) 的**命令行入口**执行
+（`evalscope perf ...`，子进程方式调用，不 import 其 Python 包，避免
+modelscope / transformers 等重依赖进入本项目环境）：
 
 ```bash
-uv tool install llm-grill          # 或 pipx / pip install
-export LLM_GRILL_BIN=/path/to/llm-grill   # 非标准安装位置时指定
+pip install 'evalscope[perf]'             # 压测功能需要 perf 附加依赖
+export EVALSCOPE_BIN=/path/to/evalscope   # 非标准安装位置时指定
 ```
 
-后端启动时与页面顶部会显示探测结果（`llm-grill --version`，缓存 60 秒）；
-不可用时「启动压测」按钮禁用并提示原因。
+后端按 `EVALSCOPE_BIN` → `PATH` → 常见安装目录的顺序定位可执行文件，都找不到时
+退化为 `<当前解释器> -m evalscope`；后端启动时与页面顶部显示探测结果
+（`evalscope --version`，缓存 60 秒），不可用时「启动压测」按钮禁用并提示原因。
 
 ### 负载模型
 
+一次压测对应一个 `evalscope perf` 进程，并发档位通过 `--parallel` / `--number`
+列表一次扫描：
+
 | 表单项 | 含义 |
 | --- | --- |
-| 固定并发 | 并发用户数 × 每用户迭代次数 × 对话轮数 = 总请求数 |
-| 阶梯加压 | 按「并发档位」逐档加压（自动升序去重），每档跑满即换档，可设每档停留时长 |
-| 爬坡时长 / 思考时间 | 并发线性爬坡秒数 / 每轮请求之间的等待秒数 |
-| 对话轮数 | >1 时同一提问重复多轮，历史中携带模型上一轮回答（长上下文/KV 缓存场景） |
-| 会话唯一前缀 | 每会话首条消息拼接唯一前缀，关闭前缀缓存以测冷启动 |
+| 固定并发 | 单档压测：`--parallel` 为并发数，`--number` 为该档的会话数 |
+| 阶梯加压 | 每档一组 `--parallel` / `--number`，档位自动升序去重（最多 20 档、单档并发上限 1024） |
+| 阶梯停顿 | 档与档之间的休眠秒数（对应 `--sleep-interval`） |
+| 对话轮数 | >1 时数据集内重复多轮同一提问，历史中携带模型上一轮回答（长上下文/KV 缓存场景） |
+| 会话唯一前缀 | 每条会话首条 user 消息拼接 1024 字符随机前缀，关闭前缀缓存以测冷启动 |
 
-llm-grill 客户端固定请求 `/v1/chat/completions`，端点只需填写到端口
-（如 `http://10.174.0.70:34000`），多余路径会被自动去除。
+提问内容以自定义会话数据集下发（`--dataset custom_multi_turn --dataset-path ...`）：
+每行一条 `messages` 数组，其中的 assistant 消息只作为轮次分界（evalscope 会丢弃其
+内容，真实回答由执行器追加），因此重复 N 轮同一段提问即等价于多轮追问。
+
+evalscope 不会自动补全请求路径：端点只填到端口时自动补 `/v1/chat/completions`
+（如 `http://10.174.0.70:34000`），已带路径前缀（如 `/v1`、`/api/paas/v4`）时只追加
+`/chat/completions`。
 
 ### 指标口径
 
-与 llm-grill 的 `AggregatedMetrics` 对齐，另加 p50 与错误分布：
+逐请求明细取自 evalscope 的结果库，聚合后补齐 p50 与错误分布：
 
-- `ttft_*`：首字延迟（首 token 到达）；`tpot_mean_s`：每输出 token 耗时；
-- `e2e_*`：端到端延迟；`tokens_per_second_mean`：单请求输出速度；
-  `total_tokens_per_second`：集群输出速度；`requests_per_second`：吞吐；
+- `ttft_*`：首字延迟（evalscope 的 `first_chunk_latency`）；`tpot_mean_s`：每输出
+  token 耗时（`time_per_output_token`）；
+- `e2e_*`：端到端延迟（`latency`）；`tokens_per_second_mean`：单请求输出速度；
+  `total_tokens_per_second`：集群输出速度；`requests_per_second`：吞吐（含失败请求）；
 - `total_duration_s`：最早请求开始 → 最晚请求结束（并发场景下不等于墙钟耗时）；
-- P95 采用与 llm-grill 相同的 `quantiles(n=20)[18]`；
-- 多轮场景额外给出逐轮 TTFT/端到端、上下文增长系数、KV 缓存命中率与占用。
+- P95 沿用升级前的 `quantiles(n=20)[18]` 口径，便于与历史结果对比；
+- 多轮场景额外给出逐轮 TTFT/端到端与上下文增长系数；evalscope 不采集目标侧 KV cache
+  指标，相关列（`kv_cache_usage` / `cache_hit_rate`）为空。
 
 ### 任务目录与停止语义
 
 `runs/stress/<run_id>/`：
 
-- `scenario.yaml`：交给 llm-grill 的场景文件（含密钥，权限 600）；
-- `results.jsonl`：llm-grill 逐请求结果，**每条即时落盘**，后端通过 tail 该文件获取实时进度；
+- `dataset.jsonl`：交给 evalscope 的自定义会话数据集（每行一条 `messages` 数组）；
+- `args.json`：本次运行的完整命令行与参数（含密钥，权限 600，页面展示时脱敏）；
+- `perf/<档位目录>/benchmark_data.db`：evalscope 的 SQLite 结果库，以
+  `--db-commit-interval 1` 逐行提交，后端据此边跑边读，实时刷新进度、曲线与明细；
 - `meta.json`：任务快照（状态、实时指标、汇总、日志），key 已脱敏；
+- `proc.json`：运行期间记录 evalscope 进程组号与所属服务进程号（权限 600），收尾时删除；
 - `results.csv`：在页面点击「下载 CSV / 结果表格」时按需导出（UTF-8 BOM）。
 
-「停止」会终止 llm-grill 进程组（SIGTERM → 超时后 SIGKILL），已完成的结果全部保留，
-状态记为 `已停止`；子进程退出码非 0、未产出任何结果、或全部请求失败时状态记为
-`失败` 并在页面显示原因。Web 服务退出时同样会清理所有运行中的压测子进程。
+提交任务后、启动 evalscope 之前，后端会先对目标端点做一次 TCP 连通性预检（3 秒超时，
+只握手不发请求、不消耗 token）：连接被拒 / 超时 / 域名解析失败会直接以 400 返回原因，
+不必等 evalscope 的 `connect_test` 吃满 `--total-timeout`。
+
+「停止」按进程组终止 evalscope（SIGTERM 等待 2 秒 → SIGKILL），并用
+`/proc/<pgid>/cmdline` 校验归属以避免误杀；已完成的结果全部保留，状态记为 `已停止`。
+因为进程组已落盘，**服务重启后仍能停掉上次遗留的压测**：服务启动时会终止这类孤儿
+进程（属于其它仍在运行的后端实例的任务除外）并把快照收敛为 `已中断`，退出时也会
+终止自身启动的全部压测。子进程退出码非 0、未产出任何结果、或全部请求失败时状态记为
+`失败` 并在页面显示原因。
 
 ## 时间显示时区
 

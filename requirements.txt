@@ -1,7 +1,10 @@
 # 评测框架运行依赖（Python 3.10+）
 # 安装: python3 -m pip install -r requirements.txt
 # 说明: Web 后端为 FastAPI + Vue3 SPA；压力测试通过子进程调用独立的
-#       llm-grill CLI（uv tool install llm-grill），不需要它的 Python 依赖。
+#       evalscope CLI 完成，因此不在此声明它的 Python 依赖。
+#       压测引擎需另行安装（重依赖，按需装到本环境或独立环境）：
+#         pip install 'evalscope[perf]'
+#       非标准安装位置时用 EVALSCOPE_BIN 指定可执行文件路径。
 fastapi==0.143.0
 uvicorn[standard]==0.54.0
 requests>=2.25.1

@@ -3,7 +3,7 @@
   "private": true,
   "version": "1.0.0",
   "type": "module",
-  "description": "SimpleQA-Verified 评测平台前端（精度测试 + llm-grill 压力测试）",
+  "description": "SimpleQA-Verified 评测平台前端（精度测试 + EvalScope 压力测试）",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
