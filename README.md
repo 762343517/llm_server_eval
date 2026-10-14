@@ -1,10 +1,10 @@
 # 大模型服务精度与性能测试框架
 
-面向**本地部署大模型服务**的评测平台，前端 Vue3 + 后端 FastAPI 的前后端分离架构，
-两个 Tab：
+面向**本地部署大模型服务**的评测平台，采用前端 Vue3 + 后端 FastAPI 的前后端分离架构，
+包含两个 Tab：
 
 - **精度测试**：SimpleQA-Verified / HLE 数据集逐题作答 → LLM 裁判判分 → 汇总 Pass@1；
-- **压力测试**：调用 [llm-grill](https://pypi.org/project/llm-grill/) CLI 对被服务并发压测，
+- **压力测试**：调用 [llm-grill](https://pypi.org/project/llm-grill/) CLI 对被测服务并发压测，
   实时展示吞吐、首字延迟、端到端延迟、阶梯并发对比与多轮 KV 缓存指标。
 
 ## 目录结构
@@ -33,15 +33,15 @@ zhipuEval
 
 ## 启动
 
-后端（等价于原来的 `script/webapp.py`）：
+后端（入口为 `backend/api.py`，等价于原来的 `script/webapp.py`）：
 
 ```bash
 python3 -m pip install -r requirements.txt
 python3 backend/api.py --host 0.0.0.0 --port 8000      # 打印前端/llm-grill 自检信息
 ```
 
-前端：仓库内 `backend/webui/` 已包含构建产物，直接用上面的命令即可访问
-`http://<host>:8000`。需要改前端时：
+前端：仓库中 `backend/webui/` 已包含构建产物，按上述命令启动即可访问
+`http://<host>:8000`。如需修改前端源码：
 
 ```bash
 npm --prefix frontend install
@@ -49,7 +49,7 @@ npm --prefix frontend run build      # 产物输出到 backend/webui/
 npm --prefix frontend run dev        # 开发态热更新（:5173，/api 代理到 :8000）
 ```
 
-精度测试命令行用法不变：
+精度测试的命令行用法保持不变：
 
 ```bash
 python3 backend/simpleqa_eval.py --data dataset/HLE/test-00000-of-00001.parquet \
@@ -65,8 +65,8 @@ python3 backend/simpleqa_eval.py --data dataset/HLE/test-00000-of-00001.parquet 
 
 两类数据统一为同一套字段后进入同一条流水线（生成 → LLM 裁判 → 汇总），
 题型（`exactMatch` / `multipleChoice`）仅影响问题文本，打分模板一致。
-HLE 中带图题目（342 题）会自动以 OpenAI 多模态格式发送（`image_url` + base64 data-url），
-图片不落入逐题记录，只记 `has_image` 标记。
+HLE 中的带图题目（342 题）会自动以 OpenAI 多模态格式发送（`image_url` + base64 data-url），
+图片不写入逐题记录，仅记录 `has_image` 标记。
 
 ## 判定与计分口径
 
@@ -74,22 +74,22 @@ HLE 中带图题目（342 题）会自动以 OpenAI 多模态格式发送（`ima
 - 逐题判定分五类：`CORRECT` / `INCORRECT` / `NOT_ATTEMPTED`（模型拒答或未作答）属有效判定；
   `JUDGE_EMPTY`（裁判空输出）与 `JUDGE_INVALID`（裁判有输出但无可识别标签）属无效判定。
 - 无效判定按「无效作答」处理：**不计入 Pass@1、拒答率、仅计作答等正确率类指标的分母**；
-  token/时延等性能指标仍按全部记录统计。结果页对两类分别展示、可单独筛选。
+  token/时延等性能指标仍按全部记录统计。结果页对两类判定分别展示，可单独筛选。
 
 ## 压力测试（llm-grill 集成）
 
 ### 依赖与识别
 
-压测由 llm-grill 的**命令行**执行（子进程方式调用，不 import 它的 Python 包，
-避免与本项目依赖混用造成版本冲突）：
+压测通过 llm-grill 的**命令行**执行（子进程方式调用，不 import 其 Python 包，
+避免与本项目依赖混用导致版本冲突）：
 
 ```bash
 uv tool install llm-grill          # 或 pipx / pip install
 export LLM_GRILL_BIN=/path/to/llm-grill   # 非标准安装位置时指定
 ```
 
-后端启动与页面顶部会显示探测结果（`llm-grill --version`，60 秒缓存）；
-不可用时「启动压测」按钮禁用并给出原因。
+后端启动时与页面顶部会显示探测结果（`llm-grill --version`，缓存 60 秒）；
+不可用时「启动压测」按钮禁用并提示原因。
 
 ### 负载模型
 
@@ -98,11 +98,11 @@ export LLM_GRILL_BIN=/path/to/llm-grill   # 非标准安装位置时指定
 | 固定并发 | 并发用户数 × 每用户迭代次数 × 对话轮数 = 总请求数 |
 | 阶梯加压 | 按「并发档位」逐档加压（自动升序去重），每档跑满即换档，可设每档停留时长 |
 | 爬坡时长 / 思考时间 | 并发线性爬坡秒数 / 每轮请求之间的等待秒数 |
-| 对话轮数 | >1 时同一提问重复多轮，历史中带模型上一轮回答（长上下文/KV 缓存场景） |
+| 对话轮数 | >1 时同一提问重复多轮，历史中携带模型上一轮回答（长上下文/KV 缓存场景） |
 | 会话唯一前缀 | 每会话首条消息拼接唯一前缀，关闭前缀缓存以测冷启动 |
 
-llm-grill 客户端固定请求 `/v1/chat/completions`，端点只需填到端口
-（如 `http://10.174.0.70:34000`），多填的路径会被自动去掉。
+llm-grill 客户端固定请求 `/v1/chat/completions`，端点只需填写到端口
+（如 `http://10.174.0.70:34000`），多余路径会被自动去除。
 
 ### 指标口径
 
@@ -120,13 +120,13 @@ llm-grill 客户端固定请求 `/v1/chat/completions`，端点只需填到端�
 `runs/stress/<run_id>/`：
 
 - `scenario.yaml`：交给 llm-grill 的场景文件（含密钥，权限 600）；
-- `results.jsonl`：llm-grill 逐请求结果，**每条即落盘**，后端 tail 该文件得到实时进度；
+- `results.jsonl`：llm-grill 逐请求结果，**每条即时落盘**，后端通过 tail 该文件获取实时进度；
 - `meta.json`：任务快照（状态、实时指标、汇总、日志），key 已脱敏；
-- `results.csv`：在页面上点「下载 CSV / 结果表格」时按需导出（UTF-8 BOM）。
+- `results.csv`：在页面点击「下载 CSV / 结果表格」时按需导出（UTF-8 BOM）。
 
 「停止」会终止 llm-grill 进程组（SIGTERM → 超时后 SIGKILL），已完成的结果全部保留，
 状态记为 `已停止`；子进程退出码非 0、未产出任何结果、或全部请求失败时状态记为
-`失败` 并在页面显示原因。Web 服务退出时也会清理所有在跑的压测子进程。
+`失败` 并在页面显示原因。Web 服务退出时同样会清理所有运行中的压测子进程。
 
 ## 时间显示时区
 
@@ -142,24 +142,24 @@ ZHIPU_EVAL_TZ=local python3 backend/api.py --host 0.0.0.0 --port 8000  # 沿用�
 
 ## 请求日志
 
-每次调用 LLM（生成 + 裁判）都会往 stderr 打一行实际发出的请求参数，格式：
+每次调用 LLM（生成与裁判）都会向 stderr 输出一行实际发出的请求参数，格式如下：
 
 ```
 2026-10-13 16:18:48 [INFO] [LLM请求] q7 stream https://open.bigmodel.cn/api/paas/v4/chat/completions {"model": "GLM-5.2-zhipu", "messages": [{"role": "user", "content": "<prompt omitted: 66 chars>"}], "max_tokens": 32768, "temperature": 0.0, "stream": true, "stream_options": {"include_usage": true}, "thinking": {"type": "enabled"}, "reasoning_effort": "high"}
 ```
 
-- 行首 `q7` / `j9` 是题号（生成 / 裁判），`stream` / `json` 表示流式与否；
-- 提示词正文、图片 data-url、API Key 都不落日志，只保留长度摘要；
+- 行首 `q7` / `j9` 是题号（生成 / 裁判），`stream` / `json` 表示是否流式；
+- 提示词正文、图片 data-url 与 API Key 均不写入日志，仅保留长度摘要；
 - 时间同样按 `ZHIPU_EVAL_TZ` 渲染；
-- Web 服务以 `nohup ... >> runs/logs/webapp.log 2>&1 &` 启动时，这些行会写进 `runs/logs/webapp.log`；
-- `ZHIPU_EVAL_LOG_REQ=0` 可关闭该日志（重试的每一次调用都会单独记一行）。
+- Web 服务以 `nohup ... >> runs/logs/webapp.log 2>&1 &` 启动时，这些行会写入 `runs/logs/webapp.log`；
+- `ZHIPU_EVAL_LOG_REQ=0` 可关闭该日志（重试的每一次调用都会单独记录一行）。
 
 ## 思考开关与强度
 
-被测模型与裁判模型各自独立控制，取值三态：**不传**（默认，交给服务端决定）、**开启**、**关闭**。
+被测模型与裁判模型各自独立控制，取值三态：**不传**（默认，由服务端决定）、**开启**、**关闭**。
 开启时可再指定强度 `low|medium|high|max`（关闭或不传时不注入该字段）。
 
-请求体附加字段沿用 `simpleqa_verified_deepseekv4.py` 验证过的约定：
+请求体附加字段沿用 `simpleqa_verified_deepseekv4.py` 中已验证的约定：
 `{"thinking": {"type": "enabled"|"disabled"}, "reasoning_effort": "<level>"}`。
 
 CLI：
@@ -172,7 +172,7 @@ CLI：
 ```
 
 Web 表单中对应「被测/裁判模型思考」与「…思考强度」四个下拉框。
-实际取值会写进 `runs/<id>/meta.json` 的 `cfg`、任务日志与 `<out>.json` 汇总（`thinking` /
+实际取值会写入 `runs/<id>/meta.json` 的 `cfg`、任务日志与 `<out>.json` 汇总（`thinking` /
 `reasoning_effort` / `judge_thinking` / `judge_reasoning_effort`），便于对比不同配置。
 
 注：关闭思考时 `reasoning_tokens_avg` 会趋于 0，`--max-tokens` 的截断翻倍重试逻辑不再触发。
@@ -187,13 +187,13 @@ Web 表单中对应「被测/裁判模型思考」与「…思考强度」四个
 ```
 
 Web 表单中对应「被测模型」与「裁判模型」两个分组，裁判模型的端点/密钥留空即复用上方配置；
-生效值记录在 `runs/<id>/meta.json` 的 `cfg.judge_endpoint` / `cfg.judge_api_key`（密钥打码）与任务日志中。
+生效值记录在 `runs/<id>/meta.json` 的 `cfg.judge_endpoint` / `cfg.judge_api_key`（密钥脱敏）与任务日志中。
 
 端点与密钥的默认值集中在 `backend/consts.py`（`DEFAULT_ENDPOINT` / `DEFAULT_API_KEY` /
-`DEFAULT_STRESS_ENDPOINT` / `DEFAULT_STRESS_API_KEY`），需要指向其它服务时改该文件即可；
+`DEFAULT_STRESS_ENDPOINT` / `DEFAULT_STRESS_API_KEY`），需要指向其它服务时修改该文件即可；
 精度测试与压测目标共用同一份默认值。
 
-Web 表单会记住上次提交的配置（精度测试存于 `runs/.last_config.json`，
-压测存于 `runs/.last_stress_config.json`，权限 600、含密钥），
+Web 表单会记住上次提交的配置（精度测试保存于 `runs/.last_config.json`，
+压测保存于 `runs/.last_stress_config.json`，权限 600、含密钥），
 刷新首页、从任务详情页返回、或在首页删除任务后重新渲染，表单内容均保持不变；
 删除这些文件即可恢复为内置默认值。

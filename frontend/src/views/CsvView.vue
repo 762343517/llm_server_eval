@@ -70,6 +70,12 @@ watch(() => [props.path, props.id, props.source], load)
   </div>
 
   <section class="card">
-    <CsvTable :data="data" :loading="loading" :error="error" @update:limit="setLimit" />
+    <CsvTable
+      :data="data"
+      :loading="loading"
+      :error="error"
+      :fixed="source === 'accuracy'"
+      @update:limit="setLimit"
+    />
   </section>
 </template>

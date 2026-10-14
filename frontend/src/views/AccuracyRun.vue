@@ -25,6 +25,16 @@ const judge = computed(() => (snap.value && snap.value.judge) || {})
 const summary = computed(() => (snap.value && snap.value.summary) || {})
 const grades = computed(() => [...new Set(items.value.map((i) => i.grade).filter(Boolean))])
 
+// 判定取值来自后端 GRADE_*（CORRECT / INCORRECT / NOT_ATTEMPTED…），统一小写比较
+const gradeOf = (g) => String(g || '').trim().toLowerCase()
+const rowClass = (row) => {
+  const g = gradeOf(row.grade)
+  if (g === 'correct') return 'row-ok'
+  if (g === 'incorrect') return 'row-bad'
+  if (g === 'not_attempted') return 'row-warn'
+  return ''
+}
+
 const summaryRows = computed(() =>
   Object.entries(summary.value).map(([k, v]) => [
     k,
@@ -138,7 +148,7 @@ onUnmounted(() => timer && clearInterval(timer))
       <StatTile label="完成题数" :value="int(summary.num_questions)" :sub="`/ ${int(summary.expected_questions)}`" />
       <StatTile label="生成失败" :value="int(gen.errors)" :tone="gen.errors ? 'bad' : ''" />
       <StatTile label="判分失败" :value="int(judge.errors)" :tone="judge.errors ? 'bad' : ''" />
-      <StatTile label="生成吞吐" :value="num(gen.tps, 1)" sub="tokens/s" />
+      <StatTile label="单请求 TPS" :value="num(gen.tps, 1)" sub="tokens/s" />
       <StatTile label="输出 token" :value="compact(gen.tokens)" />
       <StatTile label="数据集" :value="int((snap.load || {}).total)" sub="题" />
       <StatTile label="耗时" :value="duration(snap.duration_s)" />
@@ -166,8 +176,21 @@ onUnmounted(() => timer && clearInterval(timer))
     </div>
 
     <div v-if="!items.length" class="empty">暂无逐题结果</div>
-    <div v-else class="table-wrap tall">
+    <div v-else class="table-wrap tall fixed">
       <table>
+        <colgroup>
+          <col style="width: 76px" />
+          <col style="width: 96px" />
+          <col style="width: 320px" />
+          <col style="width: 360px" />
+          <col style="width: 180px" />
+          <col style="width: 260px" />
+          <col style="width: 120px" />
+          <col style="width: 130px" />
+          <col style="width: 90px" />
+          <col style="width: 100px" />
+          <col style="width: 110px" />
+        </colgroup>
         <thead>
           <tr>
             <th class="num">题号</th>
@@ -184,10 +207,10 @@ onUnmounted(() => timer && clearInterval(timer))
           </tr>
         </thead>
         <tbody>
-          <tr v-for="(row, i) in items" :key="i">
+          <tr v-for="(row, i) in items" :key="i" :class="rowClass(row)">
             <td class="num">{{ row.original_index }}</td>
             <td class="center">
-              <span class="badge" :class="{ ok: row.grade === 'correct', bad: row.grade === 'incorrect', warn: row.grade === 'incomplete' || row.incomplete }">
+              <span class="badge" :class="{ ok: gradeOf(row.grade) === 'correct', bad: gradeOf(row.grade) === 'incorrect', warn: gradeOf(row.grade) === 'not_attempted' || row.incomplete }">
                 {{ row.grade || '—' }}
               </span>
             </td>

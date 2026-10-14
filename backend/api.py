@@ -75,14 +75,14 @@ def _mtime(path):
 
 
 def _valid_run_id(run_id):
-    """run_id 会直接参与拼路径，先挡掉 ".." 之类的越权名字。"""
+    """校验 run_id：该值会参与路径拼接，需拦截 ".." 等越权名称。"""
     if not run_manager.RUN_ID_RE.match(run_id or ""):
         raise HTTPException(400, "任务 ID 不合法")
     return run_id
 
 
 def _decorate(runs):
-    """精度任务列表补充模板/前端需要的派生字段。"""
+    """为精度任务列表补充前端渲染所需的派生字段。"""
     for r in runs:
         r["status_text"] = ACC_STATUS_TEXT.get(r.get("status"), r.get("status"))
         s = r.get("summary") or {}
@@ -102,7 +102,7 @@ def api_meta():
     for d in datasets:
         d["is_csv"] = d["path"].lower().endswith(".csv")
     defaults = appconfig.accuracy_defaults()
-    # 上次用的是内置列表之外的路径时，回填到「自定义数据集路径」而不是丢掉
+    # 上次使用的路径不在内置数据集列表中时，回填到「自定义数据集路径」
     known = {d["path"] for d in datasets}
     custom_data = "" if defaults["data"] in known else defaults["data"]
     return JSONResponse({
@@ -143,7 +143,7 @@ def api_csv_download(path: str = ""):
 
 # ---------------------------------------------------------------- 精度测试
 def _accuracy_cfg(payload):
-    """校验并归一化精度测试配置（中文报错与原 webapp 保持一致）。"""
+    """校验并归一化精度测试配置（报错文案与原 webapp 保持一致）。"""
     data = ((payload.get("data_custom") or "").strip()
             or (payload.get("data") or "").strip())
     endpoint = (payload.get("endpoint") or "").strip()
@@ -154,7 +154,7 @@ def _accuracy_cfg(payload):
         raise HTTPException(400, "模型与裁判模型不能为空")
     if not endpoint.startswith("http"):
         raise HTTPException(400, "被测模型 API 端点必须以 http 开头")
-    # 裁判端点/密钥留空时复用被测模型的，二者可指向不同服务
+    # 裁判端点/密钥留空时复用被测模型配置，二者可指向不同服务
     judge_endpoint_raw = (payload.get("judge_endpoint") or "").strip()
     judge_api_key_raw = (payload.get("judge_api_key") or "").strip()
     judge_endpoint = judge_endpoint_raw or endpoint
@@ -196,7 +196,7 @@ def _accuracy_cfg(payload):
             1, _int(payload.get("max_incomplete_attempts"),
                     consts.DEFAULT_MAX_INCOMPLETE_ATTEMPTS)),
     }
-    # 表单默认值沿用「原样填写」的裁判端点/密钥，保留「留空 = 复用被测模型」的状态
+    # 持久化表单默认值：裁判端点/密钥按原始填写保存，以保留「留空即复用被测模型」的语义
     saved = {k: cfg[k] for k in appconfig.accuracy_defaults() if k in cfg}
     saved["judge_endpoint"] = judge_endpoint_raw
     saved["judge_api_key"] = judge_api_key_raw
@@ -256,7 +256,7 @@ def accuracy_delete(run_id: str):
 
 @app.get("/api/accuracy/runs/{run_id}/csv")
 def accuracy_csv(run_id: str, limit: int = csvview.CSV_DEFAULT_LIMIT):
-    """结果 CSV 预览（表格）。"""
+    """结果 CSV 预览。"""
     if not accuracy.get(_valid_run_id(run_id)):
         raise HTTPException(404, "任务不存在")
     path, _ = accuracy.export_csv(run_id)
@@ -277,7 +277,7 @@ def accuracy_download_csv(run_id: str):
 
 
 # ---------------------------------------------------------------- 压力测试
-# 上限保护：避免误操作把目标服务打爆或让一轮压测无限期跑下去
+# 参数上限保护：防止误操作压垮目标服务，或使单轮压测长时间无法结束
 STRESS_CAPS = {"max_tokens": 131072, "turns": 100, "concurrent_users": 1024,
                "iterations": 10000, "timeout": 3600, "think_time_seconds": 3600,
                "ramp_up_seconds": 3600, "ramp_pause_seconds": 3600, "level": 1024,
@@ -288,7 +288,7 @@ _API_KEY_LINE = re.compile(r'^(\s*api_key\s*:\s*)"?([^"\n]+)"?\s*$', re.M)
 
 
 def _mask_scenario(text):
-    """场景 YAML 回显前把 api_key 脱敏（原文只留在任务目录的 scenario.yaml）。"""
+    """回显场景 YAML 前对 api_key 脱敏（原文仅保留在任务目录的 scenario.yaml 中）。"""
     return _API_KEY_LINE.sub(
         lambda m: "{}{}".format(m.group(1), run_manager.mask_secret(m.group(2).strip())),
         text)
@@ -416,7 +416,7 @@ def stress_series(run_id: str, buckets: int = 60):
 
 @app.get("/api/stress/runs/{run_id}/scenario")
 def stress_scenario(run_id: str):
-    """场景 YAML 原文（api_key 已脱敏，原文在任务目录下的 scenario.yaml）。"""
+    """返回场景 YAML 原文（api_key 已脱敏，原文位于任务目录下的 scenario.yaml）。"""
     path = stress.scenario_path(run_id)
     if not path:
         raise HTTPException(404, "场景文件不存在")
@@ -478,7 +478,7 @@ def stress_download_csv(run_id: str):
 
 # ---------------------------------------------------------------- 前端 SPA
 def _placeholder():
-    """前端还没构建时的兜底页。"""
+    """前端产物未构建时的占位页面。"""
     return HTMLResponse(
         "<meta charset='utf-8'>"
         "<h2>前端尚未构建</h2>"
@@ -496,7 +496,7 @@ if os.path.isdir(os.path.join(WEBUI_DIR, "assets")):
 
 @app.get("/{path:path}")
 def spa(path: str):
-    """SPA 回落：静态文件存在就直接返回，否则交给前端路由。"""
+    """SPA 回落：命中静态文件则直接返回，否则交由前端路由处理。"""
     if path.startswith("api/"):
         raise HTTPException(404, "接口不存在")
     if path:

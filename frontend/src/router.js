@@ -2,7 +2,7 @@ import { createRouter, createWebHistory } from 'vue-router'
 import AccuracyHome from './views/AccuracyHome.vue'
 import StressHome from './views/StressHome.vue'
 
-// 详情页按需加载，首屏只带两个首页
+// 详情页按需加载，首屏仅包含两个首页
 const routes = [
   { path: '/', redirect: '/accuracy' },
   { path: '/accuracy', name: 'accuracy-home', component: AccuracyHome },

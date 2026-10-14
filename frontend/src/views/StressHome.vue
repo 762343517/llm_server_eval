@@ -118,8 +118,8 @@ onUnmounted(() => timer && clearInterval(timer))
   <section class="card">
     <h2>新建压测任务</h2>
     <p class="hint">
-      llm-grill 固定请求 <code>/v1/chat/completions</code>，这里只需填写到端口（如
-      <code>http://10.174.0.70:34000</code>），多余的路径会被自动去掉。
+      llm-grill 固定请求 <code>/v1/chat/completions</code>，此处只需填写到端口（如
+      <code>http://10.174.0.70:34000</code>），多余路径会被自动去除。
     </p>
 
     <div class="grid">
@@ -256,7 +256,7 @@ onUnmounted(() => timer && clearInterval(timer))
   <section class="card">
     <h2>压测任务</h2>
     <p class="hint">共 {{ runs.length }} 个任务{{ hasRunning ? ' · 有任务正在运行，列表每 5 秒自动刷新' : '' }}</p>
-    <div v-if="!runs.length" class="empty">还没有压测任务</div>
+    <div v-if="!runs.length" class="empty">暂无压测任务</div>
     <div v-else class="table-wrap">
       <table>
         <thead>

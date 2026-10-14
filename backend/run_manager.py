@@ -1,6 +1,6 @@
 """Web 评测任务管理：状态跟踪、持久化、CSV 导出。
 
-每个任务在 runs/<run_id>/ 下落盘，服务重启后历史任务仍可查看/下载。
+每个任务落盘于 runs/<run_id>/，服务重启后历史任务仍可查看与下载。
 """
 import calendar
 import collections
@@ -17,13 +17,13 @@ import eval_core
 
 RUNS_DIR = os.environ.get("RUNS_DIR", "runs")
 
-# run_id 直接参与拼路径（删除时会 rmtree），必须挡住 ".." 之类的越权名字
+# run_id 直接参与路径拼接（删除时会执行 rmtree），必须拦截 ".." 等越权名称
 _RUN_ID_RE = re.compile(r"^(?!.*\.\.)[0-9A-Za-z][0-9A-Za-z._-]{0,63}$")
 
 TIME_FMT = "%Y-%m-%d %H:%M:%S"
 
-# 展示时区：容器/服务器多以 UTC 运行，直接用系统时区渲染会比本地时间少 8 小时。
-# 用 ZHIPU_EVAL_TZ 指定（默认东八区），设为 local/system 则沿用系统时区。
+# 展示时区：容器/服务器多以 UTC 运行，直接按系统时区渲染会比本地时间少 8 小时。
+# 通过 ZHIPU_EVAL_TZ 指定（默认东八区），设为 local/system 则沿用系统时区。
 TZ_NAME = (os.environ.get("ZHIPU_EVAL_TZ") or "Asia/Shanghai").strip()
 _LOCAL_TZ = TZ_NAME.lower() in ("", "local", "system", "localtime")
 # 无法加载命名时区（镜像缺 tzdata）时，这些名字退回固定 +08:00
@@ -93,16 +93,16 @@ class RunState:
         self.out = out
         self.dir = os.path.dirname(out)
         self.meta_path = os.path.join(self.dir, "meta.json")
-        # 可重入锁：on_event 持锁期间会调用 log()/snapshot()，普通 Lock 会自锁死
+        # 可重入锁：on_event 持锁期间会调用 log()/snapshot()，普通 Lock 会导致自锁
         self.lock = threading.RLock()
         self.status = "running"      # running | succeeded | failed | stopped
         self.phase = "init"          # init|gen|judge|summary|done
         self.error = None
         self.started_at = time.time()
         self.finished_at = None
-        # 删除标记：置位后 save() 不再落盘，避免把已删除的目录写回来
+        # 删除标记：置位后 save() 不再落盘，避免已删除的目录被重新写回
         self.deleted = False
-        # load 在 load_start 事件里才赋值，提前初始化，避免早期失败的 run 让快照抛错
+        # load 在 load_start 事件中才赋值，此处提前初始化，避免早期失败的任务导致快照抛错
         self.load = {"loaded": 0, "total": 0, "images": 0}
         self.gen = {"done": 0, "total": 0, "errors": 0, "tokens": 0,
                     "elapsed_s": 0.0, "tps": 0.0, "cached_valid": 0,
@@ -155,7 +155,7 @@ class RunState:
             elif kind == "gen_end":
                 self.gen.update({"done": p["done"], "errors": p["errors"],
                                  "elapsed_s": p["elapsed_s"], "tps": p["tps"]})
-                self.log("[gen] 完成 {} 题，失败 {}，耗时 {:.1f} 分钟，{:.1f} tps{}"
+                self.log("[gen] 完成 {} 题，失败 {}，耗时 {:.1f} 分钟，单请求 {:.1f} tps{}"
                          .format(p["done"], p["errors"], p["elapsed_s"] / 60,
                                  p["tps"], "（已停止）" if p.get("stopped") else ""))
             elif kind == "gen_summary":
@@ -228,10 +228,10 @@ class RunState:
         return {"stage": "准备中", "pct": 0.0, "text": ""}
 
     def save(self):
-        """把快照写入 meta.json；已删除的任务直接跳过。
+        """将快照写入 meta.json；任务已删除时直接跳过。
 
-        整个写盘过程持锁，与 delete() 的删除动作互斥：否则删除瞬间在飞的
-        save() 能把 meta.json 重新写回来，任务就会在列表里「复活」。
+        写盘全程持锁，与 delete() 的删除操作互斥：否则删除瞬间仍在执行的
+        save() 会把 meta.json 重新写回，任务会再次出现在列表中。
         """
         try:
             with self.lock:
@@ -326,7 +326,7 @@ class RunManager:
         return self._states.get(run_id)
 
     def list_runs(self):
-        """内存中的任务 + 磁盘上的历史任务，按开始时间倒序。"""
+        """合并内存中的任务与磁盘上的历史任务，按开始时间倒序排列。"""
         items = {}
         with self._lock:
             for rid, st in self._states.items():
@@ -384,10 +384,10 @@ class RunManager:
         return dest, len(rows)
 
     def delete(self, run_id):
-        """删除任务目录并移出内存；返回是否确实删掉了东西。
+        """删除任务目录并移出内存；返回是否确实删除了内容。
 
-        运行中的任务被删除后 worker 仍在跑，因此这里同时置 deleted 标记并触发
-        stop_event：既让 save() 不再把 meta.json 写回来，也让它尽快停下。
+        运行中的任务被删除后 worker 仍在运行，因此这里同时置位 deleted 标记并触发
+        stop_event：既使 save() 不再写回 meta.json，也让它尽快停止。
         """
         if not _RUN_ID_RE.match(run_id or ""):
             return False
@@ -401,7 +401,7 @@ class RunManager:
             existed = os.path.isdir(target)
             shutil.rmtree(target, ignore_errors=True)
             return existed
-        with st.lock:                       # 与 save() 互斥，杜绝「复活」
+        with st.lock:                       # 与 save() 互斥，避免任务被重新写回
             st.deleted = True
             st.stop_event.set()
             shutil.rmtree(target, ignore_errors=True)
@@ -412,8 +412,8 @@ class RunManager:
 def _legacy_offset(snap):
     """从旧快照反推写入进程相对 UTC 的偏移（秒）。
 
-    旧版本用写入进程的系统时区（多为 UTC）直接渲染 started_at_str，
-    与同文件里的 started_at（epoch）一比即可还原当时的偏移，用于平移日志时间。
+    旧版本使用写入进程的系统时区（多为 UTC）渲染 started_at_str，
+    与同一文件中的 started_at（epoch）相比即可还原当时的偏移，用于平移日志时间。
     """
     try:
         written = calendar.timegm(time.strptime(snap["started_at_str"], TIME_FMT))
@@ -423,10 +423,10 @@ def _legacy_offset(snap):
 
 
 def _restamp(snap):
-    """把磁盘快照中的时间字符串改为按展示时区渲染。
+    """将磁盘快照中的时间字符串改为按展示时区渲染。
 
-    起止时间直接按 epoch 重算；日志里只有字符串（写入进程的本地时间），
-    用 _legacy_offset 推出偏移后先还原成 epoch，再按展示时区渲染。
+    起止时间直接按 epoch 重算；日志中只有字符串（写入进程的本地时间），
+    先用 _legacy_offset 推导偏移并还原为 epoch，再按展示时区渲染。
     """
     legacy = _legacy_offset(snap)
     if snap.get("started_at"):
@@ -444,16 +444,16 @@ def _restamp(snap):
 
 
 def _load_snapshot(path):
-    """读取磁盘快照：修正展示时区，再补上「已中断」标记。"""
+    """读取磁盘快照：修正展示时区，再补充「已中断」标记。"""
     with open(path) as f:
         return _mark_interrupted(_restamp(json.load(f)), path)
 
 
 def _mark_interrupted(snap, path=None):
-    """磁盘快照仍停留在 running，说明该任务所属进程已退出，标记为「已中断」。
+    """磁盘快照仍为 running，说明该任务所属进程已退出，标记为「已中断」。
 
-    真实的中断时刻无法得知，用 meta.json 的最后写入时间（即最后一次落盘）近似，
-    这样任务列表反复刷新时耗时不会一直增长。仅在 status 为 running 时改写，
+    真实的中断时刻无法得知，使用 meta.json 的最后写入时间（即最后一次落盘）近似，
+    这样任务列表反复刷新时耗时不会持续增长。仅在 status 为 running 时改写，
     已完成/失败/已停止的任务原样返回。
     """
     if snap.get("status") != "running":
@@ -496,7 +496,7 @@ def _mask(key):
     return key[:6] + "***" + key[-4:]
 
 
-# 压测任务管理复用同一套命名/时间/脱敏/快照恢复逻辑，这里给出公开别名
+# 压测任务管理复用同一套命名/时间/脱敏/快照恢复逻辑，此处提供公开别名
 RUN_ID_RE = _RUN_ID_RE
 fmt_time = _fmt
 mask_secret = _mask

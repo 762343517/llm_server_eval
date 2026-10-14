@@ -260,7 +260,7 @@ onUnmounted(() => timer && clearInterval(timer))
   <section class="card">
     <h2>历史任务</h2>
     <p class="hint">共 {{ runs.length }} 个任务{{ hasRunning ? ' · 有任务正在运行，列表每 5 秒自动刷新' : '' }}</p>
-    <div v-if="!runs.length" class="empty">还没有评测任务</div>
+    <div v-if="!runs.length" class="empty">暂无评测任务</div>
     <div v-else class="table-wrap">
       <table>
         <thead>

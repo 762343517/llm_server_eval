@@ -1,7 +1,7 @@
 """大模型精度评测核心逻辑（SimpleQA-Verified / HLE 通用）。
 
-CLI (simpleqa_eval.py) 与 Web 服务 (webapp.py) 共用同一套实现，
-所有可变配置(端点/密钥/模型/并发/上限)均通过参数注入，不再依赖模块级全局常量。
+CLI (simpleqa_eval.py) 与 Web 服务 (api.py) 共用同一套实现，
+所有可变配置（端点/密钥/模型/并发/上限）均通过参数注入，不使用模块级全局常量。
 
 数据集适配见 load_dataset()：
   - SimpleQA-Verified  CSV，字段 original_index/problem/answer/topic/answer_type
@@ -42,7 +42,7 @@ Predicted answer: {predicted_answer}
 
 First write your explanation, then on a final line output exactly one of: [Correct], [Incorrect], [Not_Attempted]"""
 
-# 裁判判定：前三种是模型作答结果，后两种是裁判自身没给出可用判定（无效作答）
+# 裁判判定：前三种为模型作答结果，后两种为裁判未给出可用判定（无效作答）
 GRADE_CORRECT = "CORRECT"
 GRADE_INCORRECT = "INCORRECT"
 GRADE_NOT_ATTEMPTED = "NOT_ATTEMPTED"
@@ -64,7 +64,7 @@ HLE_DIR = "dataset/HLE"
 # 数据集统一后的字段（_NORM_COLUMNS）：
 #   SimpleQA-Verified  CSV   -> 原列名直接可用
 #   HLE                parquet -> question->problem, raw_subject->subject,
-#                                category->topic, image 单独存放不落到逐题记录
+#                                category->topic, image 单独存放，不写入逐题记录
 _NORM_COLUMNS = ("original_index", "problem", "answer", "topic", "answer_type",
                  "subject")
 
@@ -79,7 +79,7 @@ def _find_hle_file():
 
 
 def available_datasets():
-    """内置数据集列表（含文件是否存在），供 Web 下拉选择。"""
+    """内置数据集列表（包含文件是否存在标记），供 Web 端下拉选择。"""
     items = [{"name": "SimpleQA-Verified", "path": DEFAULT_DATA}]
     hle = _find_hle_file()
     if hle:
@@ -116,10 +116,10 @@ def _row_group_bounds(pf):
 
 
 def _read_hle_images(pf, indexes, on_event=None):
-    """只读取包含目标行的 row group 的 image 列。
+    """仅读取包含目标行的 row group 的 image 列。
 
-    HLE 的 image 是内嵌 base64（整表解压后 >1GB），全量读入既慢又吃内存；
-    按命中的 row group 精确读取后，限制题量时加载时间从分钟级降到秒级。
+    HLE 的 image 为内嵌 base64（整表解压后超过 1GB），全量读取既慢且占用大量内存；
+    按命中的 row group 精确读取后，限制题量时加载耗时从分钟级降至秒级。
     """
     need = sorted({int(i) for i in indexes})
     bounds = _row_group_bounds(pf)
@@ -198,8 +198,8 @@ def load_dataset(path, limit=0, seed=0, on_event=None):
     """读取数据集并归一化为统一字段（含采样）。
 
     返回 (df, images)：df 含 _NORM_COLUMNS；images 为 {original_index: data-url}，
-    仅当数据集带图片（HLE 多模态题）时非空，避免把 base64 复制进逐题记录。
-    limit>0 时在此处完成采样，图片只加载采样命中的行。
+    仅当数据集含图片（HLE 多模态题）时非空，避免将 base64 复制进逐题记录。
+    limit>0 时在此处完成采样，图片仅加载采样命中的行。
     """
     on_event = on_event or (lambda kind, payload: None)
     kind = dataset_kind(path)
@@ -233,7 +233,7 @@ _TOKEN_CACHE_LOCK = threading.Lock()
 
 
 def count_tokens(text):
-    """估算可见回答的 token 数。思考内容不流式返回，只能用可见文本反推。"""
+    """估算可见回答的 token 数。思考内容不流式返回，只能依据可见文本反推。"""
     if not text:
         return 0
     if _ENC is None:
@@ -251,7 +251,7 @@ def count_tokens(text):
 
 # ---------------------------------------------------------------- 结果解析
 def parse_grade(text):
-    """把裁判输出解析成判定；无法解析时据实返回无效态，不伪装成拒答。
+    """将裁判输出解析为判定结果；无法解析时返回无效态，不归类为拒答。
 
     取最后一次出现的标签作为最终判定（模板要求末行给出结论）。
     """
@@ -298,7 +298,7 @@ def load_jsonl(path, key):
 
 
 def stuck_indexes(path, limit):
-    """统计被标记 incomplete 的次数，达到上限视为终态，不再无限重跑。"""
+    """统计被标记 incomplete 的次数，达到上限即视为终态，避免无限重跑。"""
     counts = {}
     if not os.path.exists(path):
         return set()
@@ -331,7 +331,7 @@ def append_jsonl(path, rec):
 # ---------------------------------------------------------------- 指标汇总
 def summarise(records, model, judge_model, data, total_questions,
               incomplete_n, failed_n):
-    """把逐题记录汇总成指标字典。
+    """将逐题记录汇总为指标字典。
 
     裁判空输出 / 裁判无法判断均为「无效作答」，不计入 Pass@1、拒答率等
     正确率类指标的分母；性能类指标仍按全部记录统计。
@@ -420,11 +420,11 @@ EFFORT_CHOICES = ("", "low", "medium", "high", "max")
 
 
 def build_think_extra(thinking, reasoning_effort=""):
-    """把思考开关/强度转成请求体附加字段。
+    """将思考开关与强度转换为请求体附加字段。
 
-    沿用 simpleqa_verified_deepseekv4.py 里验证过的约定：
+    沿用 simpleqa_verified_deepseekv4.py 中已验证的约定：
     {"thinking": {"type": "enabled"|"disabled"}, "reasoning_effort": "low|medium|high|max"}。
-    thinking 为空时不注入任何字段，保持服务端默认行为。
+    思考取值为空时不注入任何字段，保持服务端默认行为。
     """
     extra = {}
     if thinking:
@@ -435,7 +435,7 @@ def build_think_extra(thinking, reasoning_effort=""):
 
 
 def thinking_label(thinking, reasoning_effort=""):
-    """人类可读的思考配置描述，用于日志与汇总。"""
+    """思考配置的可读描述，用于日志与汇总。"""
     if not thinking:
         return "服务端默认"
     if thinking == "disabled":
@@ -456,7 +456,7 @@ _TZ_PLUS8_NAMES = ("asia/shanghai", "asia/chongqing", "asia/harbin", "asia/urumq
 
 
 def _display_tz():
-    """日志时间按展示时区渲染（默认东八区），避免容器 UTC 环境差 8 小时。"""
+    """日志时间按展示时区渲染（默认东八区），避免容器 UTC 环境下相差 8 小时。"""
     name = (os.environ.get("ZHIPU_EVAL_TZ") or "Asia/Shanghai").strip()
     if name.lower() in _TZ_LOCAL_NAMES:
         return None
@@ -489,7 +489,7 @@ if not logger.handlers:  # 自带 stderr handler，保证 INFO 在 uvicorn/CLI �
 
 
 def _brief(content):
-    """请求日志里不落提示词正文，只留长度/形态摘要。"""
+    """请求日志不记录提示词正文，仅保留长度与结构摘要。"""
     if isinstance(content, str):
         return "<prompt omitted: {} chars>".format(len(content))
     if isinstance(content, list):
@@ -512,7 +512,7 @@ def _brief(content):
 
 
 def redact_payload(payload):
-    """复制请求体，仅把 messages 正文换成摘要，其余参数原样保留。"""
+    """复制请求体，仅将 messages 正文替换为摘要，其余参数保持原样。"""
     out = dict(payload)
     out["messages"] = [dict(m, content=_brief(m.get("content")))
                        for m in payload.get("messages") or []]
@@ -521,7 +521,7 @@ def redact_payload(payload):
 
 # ---------------------------------------------------------------- HTTP 客户端
 class HttpClient:
-    """按 endpoint/api_key 参数化的流式 + 非流式调用封装。"""
+    """按 endpoint/api_key 参数化的流式与非流式调用封装。"""
 
     def __init__(self, endpoint, api_key, timeout=1800, should_stop=None,
                  extra=None):
@@ -544,7 +544,7 @@ class HttpClient:
 
     @staticmethod
     def backoff(k, status=None):
-        """402/429 限流退避要长；5xx 属上游抖动，短退避快速重试。"""
+        """402/429 采用较长退避；5xx 属上游抖动，采用短退避快速重试。"""
         if status in (429, 402):
             return min(5.0 * (k + 1), 60.0) + random.random()
         if status in (500, 502, 503, 504):
@@ -556,14 +556,14 @@ class HttpClient:
 
     @classmethod
     def is_fatal(cls, e):
-        """4xx 客户端错误（限流/超时类除外）为永久失败，重试无意义。"""
+        """4xx 客户端错误（限流/超时类除外）属永久失败，重试无意义。"""
         status = getattr(e, "status", None)
         return (status is not None and 400 <= status < 500
                 and status not in cls.RETRYABLE_4XX)
 
     @staticmethod
     def _content(prompt, image=None):
-        """带图题目走多模态消息体（data-url），纯文本题保持字符串以兼容旧服务。"""
+        """含图题目使用多模态消息体（data-url），纯文本题目保持字符串以兼容旧服务。"""
         if not image:
             return prompt
         return [
@@ -572,7 +572,7 @@ class HttpClient:
         ]
 
     def _log_request(self, kind, payload, tag=""):
-        """记录一次实际发出的请求参数（提示词只记长度）。"""
+        """记录一次实际发出的请求参数（提示词仅记录长度）。"""
         if not _LOG_REQ:
             return
         try:
@@ -645,7 +645,7 @@ class HttpClient:
 
     def chat_json(self, model, prompt, max_tokens=None, retries=8, temperature=0.0,
                   tag=""):
-        """裁判（非流式）调用。max_tokens 为 None 时不传该字段，用服务端默认值。"""
+        """裁判（非流式）调用。max_tokens 为 None 时不传该字段，使用服务端默认值。"""
         payload = {
             "model": model,
             "messages": [{"role": "user", "content": prompt}],
@@ -679,7 +679,7 @@ class HttpClient:
 def run_eval(cfg, on_event=None, should_stop=None):
     """执行一次完整评测（生成 -> 裁判 -> 汇总）。
 
-    cfg 必填: endpoint, api_key, model, judge_model, out
+    cfg 必填：endpoint, api_key, model, judge_model, out
     cfg 可选: judge_endpoint, judge_api_key（留空则复用被测模型的端点/密钥）、
              data, concurrency, judge_concurrency, limit, seed,
              max_tokens, max_tokens_cap, max_incomplete_attempts
@@ -706,7 +706,7 @@ def run_eval(cfg, on_event=None, should_stop=None):
 
     client = HttpClient(cfg["endpoint"], cfg["api_key"], should_stop=should_stop,
                         extra=build_think_extra(thinking, reasoning_effort))
-    # 裁判模型可使用独立端点/密钥，留空时回落到被测模型的配置
+    # 裁判模型可使用独立端点/密钥，留空时回退到被测模型配置
     judge_endpoint = str(cfg.get("judge_endpoint") or cfg["endpoint"])
     judge_api_key = str(cfg.get("judge_api_key") or cfg["api_key"])
     judge_client = HttpClient(
@@ -718,7 +718,7 @@ def run_eval(cfg, on_event=None, should_stop=None):
     os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
     gen_path, judge_path = out + ".gen.jsonl", out + ".judge.jsonl"
 
-    # ---------- 阶段一: 生成 ----------
+    # ---------- 阶段一：生成 ----------
     cached = load_jsonl(gen_path, "original_index")
     done = {k: v for k, v in cached.items() if not v.get("incomplete")}
     stuck = stuck_indexes(gen_path, max_incomplete_attempts)
@@ -747,13 +747,13 @@ def run_eval(cfg, on_event=None, should_stop=None):
                 model, prompt, max_tokens=mt, tag=tag, image=image
             )
             out_tok = usage.get("completion_tokens") or 0
-            # 思考占满上限 => 答案还没写出来，翻倍上限重试一轮
+            # 思考占满上限说明答案未写出，翻倍上限后重试一轮
             if finish == "length" and mt < max_tokens_cap:
                 on_event("truncated", {"tag": tag, "hit": mt, "retry": mt * 2})
                 mt = min(mt * 2, max_tokens_cap)
                 continue
             break
-        # 思考 token 不流式输出，需用可见文本 token 数做分母
+        # 思考 token 不流式输出，分母需使用可见文本的 token 数
         content_tokens = count_tokens(text)
         tpot = (total - ttft) / (content_tokens - 1) if content_tokens > 1 else None
         detail = usage.get("completion_tokens_details") or {}
@@ -781,13 +781,22 @@ def run_eval(cfg, on_event=None, should_stop=None):
         }
 
     gen_errors, gen_tokens, gen_done_n, gen_stopped = [], 0, 0, False
+    gen_tps_sum, gen_tps_n = 0.0, 0
+
+    def gen_tps():
+        """单请求平均 TPS：逐题 completion_tokens / total_s 的均值。"""
+        return round(gen_tps_sum / gen_tps_n, 1) if gen_tps_n else 0.0
+
     if todo:
         t0 = time.perf_counter()
 
         def on_gen_done(row, rec):
             append_jsonl(gen_path, rec)
-            nonlocal gen_tokens
+            nonlocal gen_tokens, gen_tps_sum, gen_tps_n
             gen_tokens += rec["completion_tokens"]
+            if rec["total_s"]:
+                gen_tps_sum += rec["completion_tokens"] / rec["total_s"]
+                gen_tps_n += 1
 
         def on_gen_fail(row, exc):
             gen_errors.append((int(row["original_index"]), str(exc)[:200]))
@@ -823,7 +832,7 @@ def run_eval(cfg, on_event=None, should_stop=None):
                         "done": gen_done_n, "total": len(todo),
                         "errors": len(gen_errors), "tokens": gen_tokens,
                         "elapsed_s": round(el, 1),
-                        "tps": round(gen_tokens / el, 1) if el else 0.0,
+                        "tps": gen_tps(),
                     })
                     last_emit = now
             for f in futs:
@@ -832,7 +841,7 @@ def run_eval(cfg, on_event=None, should_stop=None):
         on_event("gen_end", {
             "done": gen_done_n, "errors": len(gen_errors),
             "elapsed_s": round(el, 1), "tokens": gen_tokens,
-            "tps": round(gen_tokens / max(el, 1), 1), "stopped": gen_stopped,
+            "tps": gen_tps(), "stopped": gen_stopped,
         })
         if gen_errors:
             with open(out + ".gen_errors.json", "w") as f:
@@ -847,7 +856,7 @@ def run_eval(cfg, on_event=None, should_stop=None):
         "incomplete": incomplete_n, "failed": failed_n,
     })
 
-    # ---------- 阶段二: 裁判 ----------
+    # ---------- 阶段二：裁判 ----------
     judged = load_jsonl(judge_path, "original_index")
     to_judge = [r for r in gen_recs.values() if r["original_index"] not in judged]
     on_event("judge_start", {

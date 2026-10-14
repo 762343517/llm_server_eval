@@ -1,6 +1,6 @@
 """工作区内 CSV 的读取与预览（供数据集预览、结果 CSV 预览共用）。
 
-只读取工作区（项目根）内的文件，防路径穿越；单次预览行数有上限，超出提示下载。
+仅读取工作区（项目根目录）内的文件，防止路径穿越；单次预览行数有上限，超出上限时提示下载。
 """
 import csv
 import os
@@ -31,7 +31,7 @@ def read_csv(path, limit):
     """读取 CSV 表头与前 limit 行，返回 (header, rows, total, encoding)。
 
     编码依次尝试 utf-8-sig / gbk / latin-1；分隔符由 Sniffer 嗅探，失败回退逗号。
-    total 是文件的数据行总数，用于提示「仅展示前 N 行」。
+    total 为文件的数据行总数，用于提示「仅展示前 N 行」。
     """
     err = None
     for enc in ("utf-8-sig", "gbk", "latin-1"):
@@ -59,7 +59,7 @@ def read_csv(path, limit):
 
 
 def numeric_columns(header, rows, sample=200):
-    """逐列判断是否全为数字，供前端右对齐（题号 / token / 耗时等）。"""
+    """逐列判断取值是否全为数字，供前端右对齐（题号 / token / 耗时等）。"""
     flags = []
     for i in range(len(header)):
         vals = [str(r[i]).strip() for r in rows[:sample]
@@ -76,7 +76,7 @@ def numeric_columns(header, rows, sample=200):
 
 
 def preview(path, limit, title=""):
-    """组装 CSV 表格所需的全部字段（前端表格直接渲染）。"""
+    """组装 CSV 表格渲染所需的全部字段。"""
     limit = max(1, min(int(limit or CSV_DEFAULT_LIMIT), CSV_MAX_LIMIT))
     header, rows, total, enc = read_csv(path, limit)
     width = max([len(header)] + [len(r) for r in rows]) if header else 0

@@ -3,10 +3,10 @@
 任务目录 runs/stress/<run_id>/：
   meta.json      任务快照（状态 / 实时指标 / 汇总 / 日志），api_key 已脱敏
   scenario.yaml  交给 llm-grill 的场景文件（含密钥，权限 600）
-  results.jsonl  llm-grill 的逐请求结果，边跑边落盘，可 tail 出实时进度
+  results.jsonl  llm-grill 的逐请求结果，边跑边落盘，可通过 tail 获取实时进度
 
 与精度测试的 RunManager 保持同一套约定（快照字段、中断标记、删除语义），
-前端两个 Tab 因此能复用同一批组件。
+前端两个 Tab 因此可复用同一批组件。
 """
 import json
 import os
@@ -23,7 +23,7 @@ import run_manager as rm
 STRESS_SUBDIR = "stress"
 LAST_CFG = ".last_stress_config.json"
 MAX_LOGS = 200
-MAX_RECORDS = 200000            # 内存里保留的明细上限，避免超长压测把内存吃满
+MAX_RECORDS = 200000            # 内存中保留的明细上限，防止超长压测占满内存
 STATUS_TEXT = {"running": "压测中", "succeeded": "已完成", "failed": "失败",
                "stopped": "已停止", "interrupted": "已中断"}
 
@@ -66,7 +66,7 @@ class StressRun:
                               "msg": "{}".format(msg)[:600]})
 
     def _safe_cfg(self):
-        """快照里的配置：密钥脱敏（原文只留在 scenario.yaml 与 last_config）。"""
+        """快照中的配置：密钥脱敏（原文仅保留在 scenario.yaml 与 last_config 中）。"""
         safe = dict(self.cfg)
         if safe.get("api_key"):
             safe["api_key"] = rm.mask_secret(safe["api_key"])
@@ -74,7 +74,7 @@ class StressRun:
         return safe
 
     def save(self):
-        """落盘 meta.json；已删除的任务直接跳过，避免把目录写回来。"""
+        """落盘 meta.json；任务已删除时直接跳过，避免目录被重新写回。"""
         try:
             with self.lock:
                 if self.deleted:
@@ -120,7 +120,7 @@ class StressRun:
 
     # ---------------------------------------------------------------- 进度
     def _recompute(self, force=False):
-        """按已完成请求刷新实时指标与进度（节流，避免大任务反复全量聚合）。"""
+        """按已完成请求刷新实时指标与进度（节流，避免大任务频繁全量聚合）。"""
         now = time.time()
         if not force and now - self._last_agg < 0.5:
             return False
@@ -147,7 +147,7 @@ class StressRun:
             self.save()
 
     def _read_new(self, pos):
-        """从 results.jsonl 的 pos 处读增量（只消费完整行），返回新位置。"""
+        """从 results.jsonl 的 pos 位置读取增量（仅消费完整行），返回新位置。"""
         if not os.path.isfile(self.result_path):
             return pos
         try:
@@ -159,7 +159,7 @@ class StressRun:
         if not chunk:
             return pos
         lines = chunk.split(b"\n")
-        tail = lines.pop()                       # 最后一段可能还没写完
+        tail = lines.pop()                       # 最后一段可能尚未写完
         consumed = len(chunk) - len(tail)
         parsed = [rec for rec in (grill_core.parse_line(x) for x in lines) if rec]
         if parsed:
@@ -171,7 +171,7 @@ class StressRun:
         return pos + consumed
 
     def _pump_stdout(self, proc):
-        """把 llm-grill 的输出转进任务日志。"""
+        """将 llm-grill 的输出写入任务日志。"""
         try:
             for line in proc.stdout:
                 line = line.strip()
@@ -200,7 +200,7 @@ class StressRun:
 
     # ---------------------------------------------------------------- 主流程
     def worker(self):
-        """后台线程：写场景 -> 起 llm-grill -> 边跑边读结果 -> 收尾定状态。"""
+        """后台线程：写入场景文件 → 启动 llm-grill → 边跑边读取结果 → 收尾并确定状态。"""
         rc = None
         error = None
         try:
@@ -247,7 +247,7 @@ class StressRun:
             self._finalize(rc, error)
 
     def _finalize(self, rc, error):
-        """定状态、出汇总；即使失败也保留已完成的部分结果。"""
+        """确定最终状态并生成汇总；即使失败也保留已完成的部分结果。"""
         with self.lock:
             self.summary = grill_core.aggregate(self.records)
             self.conv = grill_core.conversation_metrics(self.records)
@@ -298,12 +298,12 @@ class StressManager:
     def start(self, cfg):
         """校验配置并后台启动一次压测，返回 run_id。"""
         cfg = dict(cfg)
-        grill_core.build_scenario(cfg)              # 校验失败 -> ValueError -> 400
+        grill_core.build_scenario(cfg)              # 校验失败时抛出 ValueError，由调用方转为 400
         info = grill_core.probe()
         if not info["available"]:
             raise RuntimeError(info["error"] or "llm-grill 不可用")
         run_id = rm.new_run_id()
-        cfg["run_id"] = run_id              # 让 llm-grill 结果里带上本平台的任务号
+        cfg["run_id"] = run_id              # 使 llm-grill 的结果中带上本平台的任务号
         state = StressRun(run_id, cfg, self.base)
         state.log("[准备] 正在生成 llm-grill 场景文件")
         with self._lock:
@@ -335,7 +335,7 @@ class StressManager:
             return None
 
     def list_runs(self, limit=200):
-        """内存中的任务 + 磁盘上的历史任务，按开始时间倒序。"""
+        """合并内存中的任务与磁盘上的历史任务，按开始时间倒序排列。"""
         with self._lock:
             items = {rid: self._brief(st.snapshot(include_logs=False))
                      for rid, st in self._states.items() if not st.deleted}
@@ -351,13 +351,13 @@ class StressManager:
 
     @staticmethod
     def _brief(snap):
-        """列表用精简快照：去掉大字段。"""
+        """列表使用精简快照：移除大字段。"""
         for key in ("scenario_text", "logs", "by_level", "conv"):
             snap.pop(key, None)
         return snap
 
     def records(self, run_id):
-        """读磁盘上的逐请求结果（运行中也安全，llm-grill 每条即 flush）。"""
+        """读取磁盘上的逐请求结果（运行中也可安全读取，llm-grill 每条结果即时 flush）。"""
         if not rm.RUN_ID_RE.match(run_id or ""):
             return []
         return grill_core.load_records(os.path.join(self.base, run_id, "results.jsonl"))
@@ -381,9 +381,9 @@ class StressManager:
         return True
 
     def delete(self, run_id):
-        """删除任务：先停子进程，再连同目录一起清掉。"""
+        """删除任务：先停止子进程，再连同目录一并清除。"""
         if not rm.RUN_ID_RE.match(run_id or ""):
-            return False                     # 名字不合法就不碰文件系统
+            return False                     # 名称不合法时不访问文件系统
         with self._lock:
             state = self._states.pop(run_id, None)
         if state is not None:
@@ -399,7 +399,7 @@ class StressManager:
         return existed
 
     def cancel_all(self):
-        """服务退出时终止所有在跑的压测（llm-grill 是独立进程，必须显式收尾）。"""
+        """服务退出时终止所有运行中的压测（llm-grill 为独立进程，必须显式收尾）。"""
         with self._lock:
             states = list(self._states.values())
         for state in states:

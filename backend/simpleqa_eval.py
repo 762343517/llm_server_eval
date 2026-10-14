@@ -1,21 +1,21 @@
-"""SimpleQA-Verified 精度评测 (Pass@1) —— 命令行入口
+"""SimpleQA-Verified 精度评测 (Pass@1) 命令行入口。
 
-带 502 重试、思考截断自动扩容、断点续跑、分阶段落盘。
-核心逻辑见 eval_core.py，Web 服务见 webapp.py。
+支持 502 重试、思考截断自动扩容、断点续跑与分阶段落盘。
+核心逻辑见 eval_core.py，Web 服务见 api.py。
 
 用法:
   python3 simpleqa_eval.py --model GLM-5.2-zhipu --judge-model DeepSeek-V4-Flash-0731 \
       --concurrency 8 --limit 1000 --out results/GLM-5.2-zhipu
 
-思考开关（默认不传，由服务端决定）:
+思考开关（默认不传该字段，由服务端决定）：
   --thinking / --no-thinking                被测模型是否开思考
   --reasoning-effort low|medium|high|max    被测模型思考强度
   --judge-thinking / --no-judge-thinking    裁判模型是否开思考
   --judge-reasoning-effort ...              裁判模型思考强度
 
 产出:
-  <out>.gen.jsonl    模型作答逐题记录(可续跑)
-  <out>.judge.jsonl  裁判逐题记录(可续跑)
+  <out>.gen.jsonl    模型作答逐题记录（支持续跑）
+  <out>.judge.jsonl  裁判逐题记录（支持续跑）
   <out>.json         汇总指标
   <out>.items.jsonl  逐题明细(含 grade)
 """
@@ -36,7 +36,7 @@ DEFAULT_API_KEY = consts.DEFAULT_API_KEY
 
 
 def make_printer():
-    """把 run_eval 事件还原成原有命令行日志格式。"""
+    """将 run_eval 事件输出为命令行日志。"""
     state = {"t0": 0.0, "judge_t0": 0.0, "last_gen": 0, "last_judge": 0}
 
     def on_event(kind, p):
@@ -61,13 +61,13 @@ def make_printer():
                 state["last_gen"] = p["done"]
                 print(
                     f"  gen {p['done']}/{p['total']} "
-                    f"elapsed={p['elapsed_s']/60:.1f}min tput={p['tps']:.1f}tps",
+                    f"elapsed={p['elapsed_s']/60:.1f}min avg_tps={p['tps']:.1f}",
                     flush=True,
                 )
         elif kind == "gen_end":
             print(
                 f"[gen] done={p['done']} errors={p['errors']} "
-                f"elapsed={p['elapsed_s']/60:.1f}min tput={p['tps']:.1f}tps",
+                f"elapsed={p['elapsed_s']/60:.1f}min avg_tps={p['tps']:.1f}",
                 flush=True,
             )
         elif kind == "gen_summary":
@@ -131,7 +131,7 @@ def main():
                     help="裁判模型开启思考（默认不传该字段）")
     ap.add_argument("--no-judge-thinking", dest="judge_thinking",
                     action="store_const", const="disabled",
-                    help="裁判模型关闭思考，判分更快更省 token")
+                    help="裁判模型关闭思考，加快判分并减少 token 消耗")
     ap.add_argument("--judge-reasoning-effort", default=consts.DEFAULT_REASONING_EFFORT,
                     choices=list(eval_core.EFFORT_CHOICES),
                     help="裁判模型思考强度；仅开启思考时生效（默认不传）")
@@ -142,7 +142,7 @@ def main():
     ap.add_argument("--max-tokens-cap", type=int, default=consts.DEFAULT_MAX_TOKENS_CAP)
     ap.add_argument("--max-incomplete-attempts", type=int,
                     default=consts.DEFAULT_MAX_INCOMPLETE_ATTEMPTS,
-                    help="同一题被反复判定截断后放弃重做的次数")
+                    help="同一题目连续判定截断后的最大重做次数")
     ap.add_argument("--out", required=True)
     args = ap.parse_args()
 

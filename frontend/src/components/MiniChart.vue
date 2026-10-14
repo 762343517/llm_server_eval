@@ -1,7 +1,7 @@
 <script setup>
 import { computed } from 'vue'
 
-// 极简折线图：每条曲线独立缩放（量纲不同：RPS 与秒级延迟），图例里标出各自峰值
+// 极简折线图：每条曲线独立缩放（RPS 与秒级延迟量纲不同），图例中标注各自峰值
 const props = defineProps({
   points: { type: Array, default: () => [] },
   series: { type: Array, default: () => [] },

@@ -1,8 +1,8 @@
 """表单默认值与「上次提交配置」持久化。
 
-历史配置落在 runs/.last_config.json（精度测试）与 runs/.last_stress_config.json
-（压力测试），两个文件都在已被 .gitignore 的 runs/ 目录下，权限 600——里面含明文
-密钥，是为了让页面来回跳转、删除任务后重新渲染时表单内容不被清空。
+历史配置保存于 runs/.last_config.json（精度测试）与 runs/.last_stress_config.json
+（压力测试），两者均位于已被 .gitignore 忽略的 runs/ 目录下，权限 600。文件含明文
+密钥，用途是保证页面跳转或删除任务后重新渲染时表单内容不被清空。
 """
 import json
 import os
@@ -19,7 +19,7 @@ DEFAULT_STRESS_API_KEY = consts.DEFAULT_STRESS_API_KEY
 
 APP_TITLE = "SimpleQA-Verified 评测平台"
 
-# 思考开关的三态取值（"" = 不传字段，交给服务端默认）
+# 思考开关的三态取值（"" 表示不传该字段，由服务端默认决定）
 THINKING_LABELS = {"": "服务端默认（不传该字段）", "enabled": "开启思考",
                    "disabled": "关闭思考"}
 EFFORT_LABELS = {"": "默认（不传）", "low": "low", "medium": "medium",

@@ -202,10 +202,22 @@ th {
   z-index: 1;
 }
 tbody tr:hover { background: #f9fbff; }
+/* 判定着色：正确为绿、错误为红、未作答为黄（精度测试结果表格） */
+tbody tr.row-ok { background: #ecfdf3; }
+tbody tr.row-bad { background: #fef2f2; }
+tbody tr.row-warn { background: #fffbeb; }
+tbody tr.row-ok:hover { background: #dcfce7; }
+tbody tr.row-bad:hover { background: #fee2e2; }
+tbody tr.row-warn:hover { background: #fef3c7; }
 td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 td.center, th.center { text-align: center; }
 .table-wrap .clip { max-width: 420px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .table-wrap.tall { max-height: 760px; }
+
+/* 固定列宽：列宽由 colgroup 指定，内容超出列宽时换行而非省略号截断 */
+.table-wrap.fixed table { table-layout: fixed; }
+.table-wrap.fixed th, .table-wrap.fixed td { white-space: normal; word-break: break-word; overflow-wrap: anywhere; }
+.table-wrap.fixed .clip { max-width: none; overflow: visible; text-overflow: clip; white-space: normal; }
 
 .filters { display: flex; gap: 10px; align-items: center; margin: 0 0 12px; flex-wrap: wrap; }
 .filters input[type="text"] { max-width: 260px; }

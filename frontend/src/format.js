@@ -23,7 +23,7 @@ export const shortFixed = (value, digits = 3) => {
   return n.toFixed(digits)
 }
 
-// 秒 -> 1h 02m / 03m 12s / 12.3s
+// 秒 → 1h 02m / 03m 12s / 12.3s
 export const duration = (seconds) => {
   const s = Number(seconds)
   if (!s || s < 0 || Number.isNaN(s)) return '—'
@@ -35,7 +35,7 @@ export const duration = (seconds) => {
   return `${h}h ${String(m % 60).padStart(2, '0')}m`
 }
 
-// 大数字：12345 -> 12.3k
+// 大数字：12345 → 12.3k
 export const compact = (value) => {
   const n = Number(value)
   if (value === null || value === undefined || Number.isNaN(n)) return '—'
@@ -56,7 +56,7 @@ const STATUS_KIND = {
 export const statusKind = (status) => STATUS_KIND[status] || 'off'
 export const isRunning = (status) => status === 'running'
 
-// 长文本截断（表格里展示模型回答）
+// 长文本截断（表格中展示模型回答）
 export const clip = (text, max = 120) => {
   const s = text === null || text === undefined ? '' : String(text)
   return s.length > max ? `${s.slice(0, max)}…` : s

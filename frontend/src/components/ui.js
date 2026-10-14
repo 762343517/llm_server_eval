@@ -1,4 +1,4 @@
-// 小型展示组件（用渲染函数写，避免依赖运行时模板编译器）
+// 小型展示组件（使用渲染函数实现，避免依赖运行时模板编译器）
 import { defineComponent, h } from 'vue'
 import { statusKind } from '../format'
 

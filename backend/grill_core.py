@@ -1,12 +1,12 @@
 """llm-grill 集成核心：场景生成、结果解析、指标聚合。
 
-集成方式：只调用 llm-grill 的**命令行可执行文件**，不 import 它的 Python 包。
-llm-grill 由 `uv tool` 装在自己的虚拟环境里，直接 import 会把它那套
-pydantic/anyio 依赖混进本项目的解释器，有版本冲突风险；子进程方式完全隔离。
+集成方式：仅调用 llm-grill 的**命令行可执行文件**，不 import 其 Python 包。
+llm-grill 由 `uv tool` 安装于独立虚拟环境，直接 import 会将其
+pydantic/anyio 依赖混入本项目的解释器，存在版本冲突风险；子进程方式可完全隔离。
 
 llm-grill 0.1.4 关键行为：
 - `llm-grill run <scenario.yaml> -o <results.jsonl> [-q]`，结果逐条 flush 落盘，
-  所以可以边跑边 tail 该文件做实时进度；
+  因此可边跑边 tail 该文件获取实时进度；
 - 客户端固定 POST `/v1/chat/completions`，base URL 里带路径会被覆盖；
 - 每行结果是一条 RequestMetrics（ttft_s / tpot_s / e2e_latency_s / success ...）。
 """
@@ -83,7 +83,7 @@ def probe(force=False):
 
 # --------------------------------------------------------------------- 场景生成
 def normalize_base_url(endpoint):
-    """归一成 llm-grill 需要的 base URL（scheme://host:port）。"""
+    """归一化为 llm-grill 需要的 base URL（scheme://host:port）。"""
     raw = (endpoint or "").strip()
     if not raw:
         raise ValueError("API 端点不能为空")
@@ -96,10 +96,10 @@ def normalize_base_url(endpoint):
 
 
 def _turns(cfg):
-    """多轮：同一段提问重复 N 轮，历史中带上模型上一轮回答。
+    """多轮：同一段提问重复 N 轮，历史中携带模型上一轮回答。
 
     llm-grill 的会话指标（首字延迟轮次比、上下文增长系数、KV cache 命中率）
-    正是为长上下文/缓存复用场景设计的。
+    即为长上下文与缓存复用场景设计。
     """
     turns = max(1, int(cfg.get("turns") or 1))
     prompt = (cfg.get("prompt") or "").strip()
@@ -114,7 +114,7 @@ def _turns(cfg):
 
 
 def build_scenario(cfg):
-    """Web 表单配置 -> llm-grill 场景（dict）。"""
+    """将 Web 表单配置转换为 llm-grill 场景（dict）。"""
     backend_type = (cfg.get("backend_type") or "openai").strip()
     if backend_type not in BACKEND_TYPES:
         raise ValueError("后端类型不支持: " + backend_type)
@@ -175,7 +175,7 @@ def build_scenario(cfg):
 
 
 def expected_requests(cfg):
-    """本次压测预计发出多少请求（进度百分比用）。"""
+    """本次压测预计发出的请求总数（用于计算进度百分比）。"""
     turns = max(1, int(cfg.get("turns") or 1))
     iterations = max(1, int(cfg.get("iterations") or 1))
     levels = cfg.get("ramp_levels") or []
@@ -187,7 +187,7 @@ def expected_requests(cfg):
 
 
 def dump_scenario(scenario):
-    """场景 -> YAML 文本。"""
+    """将场景字典渲染为 YAML 文本。"""
     if yaml is not None:
         return yaml.safe_dump(scenario, allow_unicode=True, sort_keys=False,
                               default_flow_style=False)
@@ -195,8 +195,8 @@ def dump_scenario(scenario):
 
 
 def _yaml_scalar(value):
-    """标量 -> YAML。字符串统一走 json.dumps：JSON 字符串是合法 YAML 双引号标量，
-    提问文本里的引号/换行/中文都不会写坏场景文件。"""
+    """将标量转换为 YAML。字符串统一经 json.dumps 处理：JSON 字符串是合法的
+    YAML 双引号标量，提问文本中的引号、换行与中文均不会破坏场景文件。"""
     if isinstance(value, bool):
         return "true" if value else "false"
     if isinstance(value, (int, float)):
@@ -207,7 +207,7 @@ def _yaml_scalar(value):
 
 
 def _dump_yaml(node, indent=0):
-    """兜底 YAML 输出（pyyaml 缺失时用），只覆盖场景文件的结构。"""
+    """备用 YAML 输出（pyyaml 缺失时使用），仅覆盖场景文件所需结构。"""
     pad = "  " * indent
     if isinstance(node, dict):
         lines = []
@@ -233,7 +233,7 @@ def _dump_yaml(node, indent=0):
 
 # --------------------------------------------------------------------- 结果解析
 def parse_line(raw):
-    """解析一行 JSONL；空行/坏行返回 None（跑挂了也保留已完成的结果）。"""
+    """解析一行 JSONL；空行或格式错误的行返回 None（进程异常退出时仍保留已完成的结果）。"""
     if isinstance(raw, bytes):
         raw = raw.decode("utf-8", "replace")
     raw = raw.strip()
@@ -281,7 +281,7 @@ def _p50(values):
 
 
 def estimate_duration(records):
-    """总时长估计（对齐 llm-grill）：最后一条结束 - 最早一条开始。"""
+    """总时长估计（与 llm-grill 对齐）：最后一条结束时间减去最早一条开始时间。"""
     spans = []
     for r in records:
         ts = r.get("timestamp_start")
@@ -300,7 +300,7 @@ def estimate_duration(records):
 def aggregate(records):
     """聚合指标，字段与 llm-grill 的 AggregatedMetrics 对齐，另加 p50 与错误样本。
 
-    RPS 按总请求数算（含失败），反映压测期间目标服务实际承受的请求速率。
+    RPS 按总请求数计算（含失败请求），反映压测期间目标服务实际承受的请求速率。
     """
     total = len(records)
     ok = [r for r in records if r.get("success")]
@@ -399,7 +399,7 @@ def conversation_metrics(records):
 
 
 def series(records, buckets=60):
-    """按时间分桶的时序数据，给前端画实时曲线用。"""
+    """按时间分桶的时序数据，供前端绘制实时曲线。"""
     points = []
     for r in records:
         ts = r.get("timestamp_start")
@@ -438,7 +438,7 @@ def series(records, buckets=60):
 
 
 def row_for_csv(record):
-    """压测结果为 CSV 导出的列（顺序与 CSV_HEADER 一致）。"""
+    """压测结果导出 CSV 时的列顺序（与 CSV_HEADER 一致）。"""
     return [
         record.get("run_id", ""),
         record.get("timestamp_start", ""),

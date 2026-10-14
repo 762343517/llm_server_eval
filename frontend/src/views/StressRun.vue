@@ -225,7 +225,7 @@ onUnmounted(() => timer && clearInterval(timer))
 
   <section v-if="conv" class="card">
     <h2>多轮会话指标</h2>
-    <p class="hint">观察到模型把上一轮回答作为上下文，用于评估长上下文与 KV 缓存复用</p>
+    <p class="hint">模型将上一轮回答作为上下文，用于评估长上下文与 KV 缓存复用</p>
     <div class="stats">
       <StatTile
         label="上下文增长系数"
