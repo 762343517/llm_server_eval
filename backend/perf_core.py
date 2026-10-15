@@ -13,6 +13,15 @@ evalscope 1.13 关键行为（本项目依赖的部分）：
 - 结果落盘为 SQLite：每个档位目录下 `benchmark_data.db`，表名 `result`，逐行提交
   （`--db-commit-interval` 控制缓冲行数），因此可边跑边读做实时进度；
   `--enable-progress-tracker` 另写 progress.json（processed/total 计数）。
+
+长序列 / Prefix Cache 场景（`prompt_mode=long`）用 evalscope 的另外两个数据集：
+- `--dataset random`：按 tokenizer 精确生成 `--prefix-length` 个**所有请求共享**的前缀
+  token，后缀长度由 `--min/max-prompt-length` 控制，因此
+  序列长度 = 前缀长度 + 后缀长度、Prefix Cache 命中率 = 前缀长度 / 序列长度；
+- `--dataset line_by_line` + `--dataset-args '{"prefix_file": ..., "target_input_len": N}'`：
+  逐行读取提问文本，把 `prefix_file` 的内容（过短时重复平铺）注入为系统消息前缀，
+  使每次请求的**前缀内容完全一致**、整段输入恰好 N 个 token。
+两种数据集都是单轮请求，`--number` 即请求数（不按会话数 × 轮次换算）。
 """
 import json
 import os
@@ -32,9 +41,24 @@ from urllib.parse import urlsplit
 CLI_NAME = "evalscope"
 API_NAME = "openai"                       # 被测服务统一按 OpenAI 兼容协议访问
 DATASET_NAME = "custom_multi_turn"        # 自定义会话数据集（支持多轮）
+DATASET_FILE = "dataset.jsonl"            # 自定义会话数据集的文件名
 DEFAULT_API_PATH = "/v1/chat/completions"
 RESULT_DB_NAME = "benchmark_data.db"
 RUN_NAME = "perf"
+
+# 请求模式：chat = 自定义会话提问；long = 长序列 + 固定前缀（Prefix Cache 命中率）
+MODE_CHAT = "chat"
+MODE_LONG = "long"
+PROMPT_MODES = (MODE_CHAT, MODE_LONG)
+# long 模式的两种 evalscope 数据集：
+#   random      —— 按 token 精确生成「固定共享前缀 + 变长后缀」，前缀长度可控；
+#   line_by_line—— 由本地文本逐行提供提问，配合 prefix_file 注入「固定的前缀内容」。
+DATASET_RANDOM = "random"
+DATASET_LINE = "line_by_line"
+LONG_DATASET_FILE = "prompts.txt"         # line_by_line 的逐行提问文件
+PREFIX_FILE = "prefix.txt"                # 固定前缀内容落盘文件
+TOKEN_SUFFIXES = (("k", 1000), ("m", 1000000))   # 序列长度写法：128K = 128000
+
 # 逐行提交的缓冲行数：越小实时性越好，越大写入开销越小。
 # 取 1 是为了让运行中的进度/明细能立即读到（evalscope 的写入在独立线程，开销可控）。
 DB_COMMIT_INTERVAL = 1
@@ -42,6 +66,8 @@ DB_COMMIT_INTERVAL = 1
 UNIQUE_PREFIX_CHARS = 1024
 # 单条 prompt 的长度上限（字符，evalscope 默认值）
 MAX_PROMPT_LENGTH = 131072
+# 长序列 + 固定前缀内容模式下，未填写提问内容时使用的默认问题
+DEFAULT_LONG_QUESTION = "请用一句话介绍你自己。"
 # 启动前目标连通性预检的超时（秒）：只做一次 TCP 握手，不发 HTTP、不消耗 token。
 # 用于在 evalscope 的 connect_test 之前给出结论，避免地址填错时白等 --total-timeout。
 PRECHECK_TIMEOUT = 3.0
@@ -213,18 +239,181 @@ def conversation_count(cfg, users):
 
 
 def expected_requests(cfg):
-    """本次压测预计发出的请求总数（= 会话数 × 轮次），用于计算进度百分比。"""
-    turns = max(1, int(cfg.get("turns") or 1))
+    """本次压测预计发出的请求总数，用于计算进度百分比。
+
+    chat 模式 = 会话数 × 轮次；long 模式为单轮请求，不再乘轮次。
+    """
+    turns = 1 if prompt_mode(cfg) == MODE_LONG else max(1, int(cfg.get("turns") or 1))
     return sum(conversation_count(cfg, u) for u in levels(cfg)) * turns
+
+
+# --------------------------------------------------------------------- 长序列模式
+def prompt_mode(cfg):
+    """归一化请求模式：chat（自定义会话）/ long（长序列 + 固定前缀）。"""
+    mode = str(cfg.get("prompt_mode") or MODE_CHAT).strip().lower()
+    return MODE_LONG if mode == MODE_LONG else MODE_CHAT
+
+
+def parse_tokens(value, default=0):
+    """解析 token 长度：支持 128000 / "128000" / "128K" / "1M"（K=1000、M=1000000）。"""
+    if value is None or value == "":
+        return max(0, int(default))
+    if isinstance(value, bool):
+        return max(0, int(default))
+    if isinstance(value, (int, float)):
+        return max(0, int(value))
+    text = str(value).strip().lower().replace(",", "").replace("_", "")
+    if not text:
+        return max(0, int(default))
+    factor = 1
+    for suffix, mult in TOKEN_SUFFIXES:
+        if text.endswith(suffix):
+            factor, text = mult, text[: -len(suffix)]
+            break
+    try:
+        return max(0, int(float(text) * factor))
+    except ValueError:
+        raise ValueError("token 长度格式不合法：{}".format(value))
+
+
+def seq_length(cfg):
+    """序列长度（输入 tokens）。"""
+    return parse_tokens(cfg.get("seq_length"), 0)
+
+
+def prefix_length(cfg):
+    """固定共享前缀长度（tokens）：显式值优先，否则按 Prefix Cache 命中率换算。"""
+    total = seq_length(cfg)
+    fixed = parse_tokens(cfg.get("prefix_length"), 0)
+    if fixed > 0:
+        return min(fixed, total)
+    ratio = max(0.0, min(1.0, float(cfg.get("prefix_cache_ratio") or 0.0)))
+    return int(total * ratio)
+
+
+def suffix_length(cfg):
+    """变长后缀长度（tokens）= 序列长度 - 固定前缀长度。"""
+    return max(0, seq_length(cfg) - prefix_length(cfg))
+
+
+def cache_hit_ratio(cfg):
+    """实际 Prefix Cache 命中率（前缀长度 / 序列长度）。"""
+    total = seq_length(cfg)
+    return (prefix_length(cfg) / total) if total else 0.0
+
+
+def output_length(cfg):
+    """输出 tokens：显式配置优先，否则沿用 max_tokens。"""
+    out = parse_tokens(cfg.get("output_length"), 0)
+    return out if out > 0 else max(1, int(cfg.get("max_tokens") or 512))
+
+
+def prefix_content(cfg):
+    """用户填写的固定前缀内容（可为空）。"""
+    return str(cfg.get("prefix_content") or "").strip()
+
+
+def long_dataset(cfg):
+    """long 模式的 evalscope 数据集名。
+
+    填写了固定前缀内容时用 line_by_line + prefix_file（前缀内容完全一致），
+    否则用 random（由 evalscope 生成所有请求共享的固定前缀，长度精确可控）。
+    """
+    return DATASET_LINE if prefix_content(cfg) else DATASET_RANDOM
+
+
+def prefix_file_path(run_dir):
+    return os.path.join(str(run_dir), PREFIX_FILE)
+
+
+def dataset_file(cfg, run_dir):
+    """长序列模式下载荷文件的落盘路径（chat 模式固定为 dataset.jsonl）。"""
+    if prompt_mode(cfg) == MODE_LONG and long_dataset(cfg) == DATASET_LINE:
+        return os.path.join(str(run_dir), LONG_DATASET_FILE)
+    return os.path.join(str(run_dir), DATASET_FILE)
+
+
+def has_chat_template(path):
+    """本地分词器目录是否带对话模板（tokenizer_config.json 字段或 chat_template.jinja）。"""
+    config = os.path.join(path, "tokenizer_config.json")
+    if os.path.isfile(config):
+        try:
+            with open(config, encoding="utf-8") as fh:
+                if str(json.load(fh).get("chat_template") or "").strip():
+                    return True
+        except (OSError, ValueError):
+            return True                     # 读不出来时不误判，交给 evalscope 报错
+    return os.path.isfile(os.path.join(path, "chat_template.jinja"))
+
+
+def validate_tokenizer(tokenizer):
+    """提前校验分词器目录，避免 evalscope 子进程里抛出难以定位的 traceback。
+
+    只检查绝对路径（模型 ID 形式的远程分词器无法在本地校验）。evalscope 会用
+    `--tokenizer-path` 指向的分词器在客户端套用一次对话模板来估算 prompt token 数
+    （random 数据集必须扣除模板开销），因此分词器目录必须带 chat template；本仓库
+    的 model/GLM-5.3 已随附 chat_template.jinja。
+    """
+    if not os.path.isabs(tokenizer):
+        return
+    if not os.path.isdir(tokenizer):
+        raise ValueError("分词器路径不存在：{}".format(tokenizer))
+    if not has_chat_template(tokenizer):
+        raise ValueError(
+            "分词器目录缺少对话模板：evalscope 需要它在客户端估算 prompt token 数，"
+            "请在 {} 下添加 chat_template.jinja（或 tokenizer_config.json 的 "
+            "chat_template 字段）".format(tokenizer))
+
+
+def validate(cfg):
+    """启动前的配置校验：不合法时抛 ValueError（由调用方转 400）。"""
+    if not (cfg.get("model") or "").strip():
+        raise ValueError("模型名不能为空")
+    if prompt_mode(cfg) != MODE_LONG:
+        conversation_messages(cfg)          # 提问内容不能为空
+        return
+    tokenizer = str(cfg.get("tokenizer_path") or "").strip()
+    if not tokenizer:
+        raise ValueError("长序列模式需要填写分词器路径（tokenizer_path），"
+                         "evalscope 按 token 精确生成长序列时必须提供")
+    validate_tokenizer(tokenizer)
+
+    total = seq_length(cfg)
+    if total <= 0:
+        raise ValueError("序列长度必须大于 0")
+    fixed = parse_tokens(cfg.get("prefix_length"), 0)
+    if fixed > total:
+        raise ValueError("固定前缀长度不能大于序列长度")
+    if prefix_content(cfg) and fixed >= total:
+        raise ValueError("固定前缀长度必须小于序列长度（否则没有变长后缀）")
+    if output_length(cfg) <= 0:
+        raise ValueError("输出长度必须大于 0")
+
+
+def prepare(cfg, run_dir):
+    """落盘本模式所需的全部载荷文件（chat 会话、long 的 prefix.txt + 提问文本）。"""
+    if prompt_mode(cfg) == MODE_LONG and long_dataset(cfg) == DATASET_RANDOM:
+        return None                     # random 数据集由 evalscope 自行生成
+    path = os.path.abspath(dataset_file(cfg, run_dir))
+    build_dataset(cfg, path)
+    return path
 
 
 # --------------------------------------------------------------------- 数据集 / 命令行
 def build_dataset(cfg, path):
-    """写 evalscope 数据集（JSONL，每行一条会话）。
+    """写 evalscope 数据集（按模式选择内容）。
 
-    evalscope 会循环使用数据集，因此默认只写一行即可；打开 unique_prefix 时按预计
-    会话数写同样多行，让每条请求都带不同的随机前缀。
+    - chat：JSONL，每行一条会话 messages 数组。evalscope 会循环使用数据集，因此默认
+      只写一行即可；打开 unique_prefix 时按预计会话数写同样多行，让每条请求都带不同
+      的随机前缀；
+    - long + 固定前缀内容：同目录写 prefix.txt（固定前缀），path 逐行写提问（纯文本），
+      交给 evalscope 的 line_by_line + prefix_file 注入；
+    - long + 共享随机前缀：由 evalscope 自行生成，不落任何数据文件。
     """
+    if prompt_mode(cfg) == MODE_LONG:
+        if long_dataset(cfg) == DATASET_RANDOM:
+            return path
+        return _build_long_dataset(cfg, path)
     rows = max(conversation_count(cfg, u) for u in levels(cfg))
     if not bool(cfg.get("unique_prefix")):
         rows = 1
@@ -237,54 +426,131 @@ def build_dataset(cfg, path):
     return path
 
 
-def build_command(cfg, run_dir, dataset_path):
+def _build_long_dataset(cfg, path):
+    """long + 固定前缀内容：写 prefix.txt（固定前缀）与提问文本文件。"""
+    content = prefix_content(cfg)
+    if not content:
+        raise ValueError("固定前缀内容不能为空")
+    run_dir = os.path.dirname(os.path.abspath(path))
+    os.makedirs(run_dir, exist_ok=True)
+    with open(prefix_file_path(run_dir), "w", encoding="utf-8") as f:
+        f.write(content if content.endswith("\n") else content + "\n")
+    question = (cfg.get("prompt") or "").strip() or DEFAULT_LONG_QUESTION
+    # 每条请求的提问（= 前缀之后的可变后缀）都不同，避免后缀也整体命中缓存
+    rows = max(conversation_count(cfg, u) for u in levels(cfg))
+    with open(path, "w", encoding="utf-8") as f:
+        for i in range(rows):
+            f.write("{}{}\n".format(question, "" if rows == 1 else "（第 {} 条请求）".format(i + 1)))
+    return path
+
+
+def build_command(cfg, run_dir, dataset_path=None):
     """构造 `evalscope perf` 命令行参数。"""
     model = (cfg.get("model") or "").strip()
     if not model:
         raise ValueError("模型名不能为空")
     users = levels(cfg)
     numbers = [conversation_count(cfg, u) for u in users]
+    dataset, ds_path, ds_args = dataset_spec(cfg, run_dir)
 
     cmd = command_prefix() + [
         "perf",
         "--api", API_NAME,
         "--model", model,
         "--url", normalize_endpoint(cfg.get("endpoint")),
-        "--dataset", DATASET_NAME,
-        "--dataset-path", os.path.abspath(str(dataset_path)),
-        "--multi-turn",
-        "--max-turns", str(max(1, int(cfg.get("turns") or 1))),
+        "--dataset", dataset,
+    ]
+    if ds_path:
+        cmd += ["--dataset-path", ds_path]
+    if ds_args is not None:
+        cmd += ["--dataset-args", json.dumps(ds_args, ensure_ascii=False)]
+    if prompt_mode(cfg) == MODE_CHAT:
+        cmd += [
+            # 自定义会话数据集：assistant 消息仅作轮次分界
+            "--multi-turn",
+            "--max-turns", str(max(1, int(cfg.get("turns") or 1))),
+        ]
+    cmd += [
         "--number", *[str(n) for n in numbers],
         "--parallel", *[str(u) for u in users],
         "--sleep-interval",
         str(int(max(0.0, float(cfg.get("ramp_pause_seconds") or 0.0)))),
-        "--max-tokens", str(max(1, int(cfg.get("max_tokens") or 512))),
-        "--temperature", str(float(cfg.get("temperature") or 0.0)),
-        "--top-p", str(float(cfg.get("top_p")
-                             if cfg.get("top_p") not in (None, "") else 1.0)),
         "--total-timeout", str(max(1, int(float(cfg.get("timeout") or 120)))),
-        "--max-prompt-length", str(MAX_PROMPT_LENGTH),
         "--db-commit-interval", str(DB_COMMIT_INTERVAL),
         "--outputs-dir", os.path.abspath(str(run_dir)),
         "--name", RUN_NAME,
         "--no-timestamp",
     ]
+    if prompt_mode(cfg) == MODE_LONG:
+        cmd += _long_arguments(cfg)
+    else:
+        cmd += ["--max-tokens", str(max(1, int(cfg.get("max_tokens") or 512))),
+                "--max-prompt-length", str(MAX_PROMPT_LENGTH)]
+    cmd += ["--temperature", str(float(cfg.get("temperature") or 0.0))]
+    top_p = cfg.get("top_p")
+    cmd += ["--top-p", str(float(1.0 if top_p in (None, "") else top_p))]
     api_key = (cfg.get("api_key") or "").strip()
     if api_key:
         cmd += ["--api-key", api_key]
     top_k = int(cfg.get("top_k") or -1)
     if top_k >= 0:                      # -1 表示不注入该字段
         cmd += ["--top-k", str(top_k)]
+    if bool(cfg.get("ignore_eos")):
+        cmd += ["--extra-args", json.dumps({"ignore_eos": True})]
     return cmd
 
 
-def dump_args(cfg, run_dir, dataset_path):
+def _long_arguments(cfg):
+    """长序列模式专属参数：序列长度 / 固定前缀 / 输出长度 / 预热。"""
+    if long_dataset(cfg) == DATASET_RANDOM:
+        return [
+            "--tokenizer-path", str(cfg.get("tokenizer_path") or "").strip(),
+            "--prefix-length", str(prefix_length(cfg)),
+            "--min-prompt-length", str(suffix_length(cfg)),
+            "--max-prompt-length", str(suffix_length(cfg)),
+        ] + _long_common_arguments(cfg)
+    # line_by_line + prefix_file：由 target_input_len 控制总长，前缀长度自动 = 序列长度 - 提问
+    return [
+        "--tokenizer-path", str(cfg.get("tokenizer_path") or "").strip(),
+    ] + _long_common_arguments(cfg)
+
+
+def _long_common_arguments(cfg):
+    """长序列模式共用的输出长度 / 预热参数。"""
+    out = output_length(cfg)
+    args = ["--min-tokens", str(out), "--max-tokens", str(out)]
+    warmup = max(0, int(float(cfg.get("warmup_num") or 0)))
+    if warmup:
+        args += ["--warmup-num", str(warmup)]
+    return args
+
+
+def dataset_spec(cfg, run_dir):
+    """返回 (dataset 名, dataset-path, dataset-args)；供命令行与结果解析共用。"""
+    if prompt_mode(cfg) == MODE_LONG and long_dataset(cfg) == DATASET_RANDOM:
+        return DATASET_RANDOM, None, None
+    path = os.path.abspath(dataset_file(cfg, run_dir))
+    if prompt_mode(cfg) == MODE_LONG:
+        return DATASET_LINE, path, {
+            "prefix_file": os.path.abspath(prefix_file_path(run_dir)),
+            "target_input_len": seq_length(cfg),
+            "input_len_mode": "cap",
+            "prefix_role": "system",
+        }
+    return DATASET_NAME, path, None
+
+
+def dump_args(cfg, run_dir, dataset_path=None):
     """渲染本次运行参数（落盘为 args.json，供页面「查看运行参数」）。"""
-    argv = build_command(cfg, run_dir, dataset_path)
-    return json.dumps({
-        "command": argv,
+    dataset, ds_path, ds_args = dataset_spec(cfg, run_dir)
+    payload = {
+        "command": build_command(cfg, run_dir, dataset_path),
         "endpoint": normalize_endpoint(cfg.get("endpoint")),
         "model": cfg.get("model"),
+        "prompt_mode": prompt_mode(cfg),
+        "dataset": dataset,
+        "dataset_path": ds_path,
+        "dataset_args": ds_args,
         "max_tokens": cfg.get("max_tokens"),
         "temperature": cfg.get("temperature"),
         "top_p": cfg.get("top_p"),
@@ -297,9 +563,26 @@ def dump_args(cfg, run_dir, dataset_path):
                    for u in levels(cfg)],
         "sleep_interval": cfg.get("ramp_pause_seconds"),
         "expected_requests": expected_requests(cfg),
-        "dataset_path": os.path.abspath(str(dataset_path)),
         "api_key": "***" if (cfg.get("api_key") or "").strip() else "",
-    }, ensure_ascii=False, indent=2) + "\n"
+    }
+    if prompt_mode(cfg) == MODE_LONG:
+        custom_prefix = bool(prefix_content(cfg))
+        payload["long"] = {
+            "tokenizer_path": cfg.get("tokenizer_path"),
+            "seq_length": seq_length(cfg),
+            "output_length": output_length(cfg),
+            # 固定前缀内容模式下前缀长度由「序列长度 − 提问长度」自动决定
+            "prefix_length": None if custom_prefix else prefix_length(cfg),
+            "prefix_length_mode": "auto" if custom_prefix else "explicit",
+            "suffix_length": None if custom_prefix else suffix_length(cfg),
+            "prefix_cache_ratio": None if custom_prefix else round(cache_hit_ratio(cfg), 4),
+            "prefix_content_chars": len(prefix_content(cfg)),
+            "prefix_file": (os.path.abspath(prefix_file_path(run_dir))
+                            if custom_prefix else None),
+            "warmup_num": max(0, int(float(cfg.get("warmup_num") or 0))),
+            "ignore_eos": bool(cfg.get("ignore_eos")),
+        }
+    return json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
 
 
 # --------------------------------------------------------------------- 结果解析

@@ -1,6 +1,13 @@
 # 评测/压测任务的运行数据（含结果文件与明文密钥的 last_config）
 runs/*
 
+# 本地放置的分词器 / 模型权重（体积大，不入库）
+model/*
+# 但对话模板需要入库：evalscope 用它在客户端估算 prompt token 数，缺了会直接报错
+!model/GLM-5.3/
+model/GLM-5.3/*
+!model/GLM-5.3/chat_template.jinja
+
 # Python
 __pycache__/
 *.py[cod]

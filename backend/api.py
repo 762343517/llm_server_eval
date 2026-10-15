@@ -277,7 +277,9 @@ def accuracy_download_csv(run_id: str):
 # 参数上限保护：防止误操作压垮目标服务，或使单轮压测长时间无法结束
 STRESS_CAPS = {"max_tokens": 131072, "turns": 100, "concurrent_users": 1024,
                "iterations": 10000, "timeout": 3600, "ramp_pause_seconds": 3600,
-               "level": 1024, "levels": 20}
+               "level": 1024, "levels": 20, "seq_length": 2097152,
+               "output_length": 131072, "prefix_length": 2097152,
+               "warmup_num": 100000}
 
 
 def _capped(value, key, label):
@@ -286,6 +288,14 @@ def _capped(value, key, label):
     if value > limit:
         raise ValueError("{} 不能超过 {}".format(label, limit))
     return value
+
+
+def _tokens(value, key, label, default=0):
+    """解析 token 长度（支持 128K 这类写法）并套用上限保护。"""
+    tokens = perf_core.parse_tokens(value, default)
+    if tokens > STRESS_CAPS[key]:
+        raise ValueError("{} 不能超过 {}".format(label, STRESS_CAPS[key]))
+    return tokens
 
 
 def _stress_cfg(payload):
@@ -301,6 +311,7 @@ def _stress_cfg(payload):
     if len(levels) > STRESS_CAPS["levels"]:
         raise ValueError("并发档位最多 {} 个".format(STRESS_CAPS["levels"]))
 
+    prompt_mode = "long" if (payload.get("prompt_mode") or "") == "long" else "chat"
     cfg = {
         "name": (payload.get("name") or "stress").strip() or "stress",
         "description": (payload.get("description") or "").strip(),
@@ -328,13 +339,26 @@ def _stress_cfg(payload):
             _float(payload.get("ramp_pause_seconds"),
                    consts.DEFAULT_STRESS_RAMP_PAUSE_SECONDS),
             STRESS_CAPS["ramp_pause_seconds"])),
+        # 长序列 + 固定前缀（Prefix Cache 命中率）场景
+        "prompt_mode": prompt_mode,
+        "tokenizer_path": (payload.get("tokenizer_path") or "").strip(),
+        "seq_length": _tokens(payload.get("seq_length"), "seq_length", "序列长度",
+                              consts.DEFAULT_STRESS_SEQ_LENGTH),
+        "output_length": _tokens(payload.get("output_length"), "output_length",
+                                 "输出长度", consts.DEFAULT_STRESS_OUTPUT_LENGTH),
+        "prefix_cache_ratio": max(0.0, min(1.0, _float(
+            payload.get("prefix_cache_ratio"), consts.DEFAULT_STRESS_PREFIX_CACHE_RATIO))),
+        "prefix_length": _tokens(payload.get("prefix_length"), "prefix_length",
+                                 "固定前缀长度", consts.DEFAULT_STRESS_PREFIX_LENGTH),
+        "prefix_content": str(payload.get("prefix_content") or ""),
+        "warmup_num": _capped(payload.get("warmup_num"), "warmup_num", "预热请求数"),
+        "ignore_eos": bool(payload.get("ignore_eos")),
     }
     if cfg["temperature"] < 0 or cfg["temperature"] > 2:
         raise ValueError("temperature 需在 0~2 之间")
     if cfg["top_p"] <= 0 or cfg["top_p"] > 1:
         raise ValueError("top_p 需在 0~1 之间")
-    if not cfg["prompt"]:
-        raise ValueError("提问内容不能为空")
+    perf_core.validate(cfg)             # 提问内容 / 长序列参数校验
     return cfg
 
 

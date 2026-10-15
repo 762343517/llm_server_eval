@@ -2,7 +2,9 @@
 
 任务目录 runs/stress/<run_id>/：
   meta.json     任务快照（状态 / 实时指标 / 汇总 / 日志），api_key 已脱敏
-  dataset.jsonl 交给 evalscope 的自定义数据集（每行一条会话 messages）
+  dataset.jsonl 交给 evalscope 的自定义会话数据集（每行一条会话 messages）
+  prompts.txt   长序列 + 固定前缀内容模式下的逐行提问（line_by_line 数据集）
+  prefix.txt    长序列 + 固定前缀内容模式下的固定前缀正文
   args.json     本次运行参数与完整命令（含密钥，权限 600，展示时已脱敏）
   perf/         evalscope 的产物目录：各并发档位下 benchmark_data.db（逐行提交，可边跑边读）
 
@@ -24,7 +26,6 @@ import run_manager as rm
 STRESS_SUBDIR = "stress"
 LAST_CFG = ".last_stress_config.json"
 ARGS_NAME = "args.json"
-DATASET_NAME = "dataset.jsonl"
 MAX_LOGS = 200
 MAX_RECORDS = 200000            # 内存中保留的明细上限，防止超长压测占满内存
 STATUS_TEXT = {"running": "压测中", "succeeded": "已完成", "failed": "失败",
@@ -231,7 +232,8 @@ class StressRun:
         self.dir = os.path.join(base_dir, run_id)
         self.meta_path = os.path.join(self.dir, "meta.json")
         self.args_path = os.path.join(self.dir, ARGS_NAME)
-        self.dataset_path = os.path.join(self.dir, DATASET_NAME)
+        # 数据集文件名随模式变化（长序列 + 固定前缀内容时是纯文本 prompts.txt）
+        self.dataset_path = perf_core.dataset_file(cfg, self.dir)
         self.lock = threading.RLock()
         self.stop_event = threading.Event()
         self.deleted = False
@@ -268,6 +270,10 @@ class StressRun:
         if safe.get("api_key"):
             safe["api_key"] = rm.mask_secret(safe["api_key"])
         safe.pop("ramp_levels_text", None)
+        # 固定前缀内容可能是整篇文档，快照只保留长度，正文落在任务目录 prefix.txt
+        content = safe.pop("prefix_content", "")
+        if content:
+            safe["prefix_content_chars"] = len(content)
         return safe
 
     def save(self):
@@ -498,7 +504,7 @@ class StressManager:
     def start(self, cfg):
         """校验配置并后台启动一次压测，返回 run_id。"""
         cfg = dict(cfg)
-        perf_core.build_dataset(cfg, os.devnull)  # 校验失败时抛 ValueError，由调用方转 400
+        perf_core.validate(cfg)             # 校验失败时抛 ValueError，由调用方转 400
         # 预检目标可达性：地址/端口填错时立即失败，不必等 evalscope 的 connect_test 超时
         ok, why = perf_core.precheck_target(cfg.get("endpoint"))
         if not ok:

@@ -1,0 +1,23 @@
+{#-
+  GLM 对话模板（ChatGLM / GLM-4.x 系列格式）。
+
+  tokenizer_config.json 里没有 chat_template 字段，而 evalscope 的 perf 在用
+  `--tokenizer-path` 生成/校验长序列时会在客户端套用一次模板来估算 prompt token
+  数（random 数据集必须扣除模板开销、line_by_line 需要校验长度），缺少模板会直接
+  报 "tokenizer.chat_template is not set"。
+
+  该模板只用于客户端计数，不会改变发给服务端的请求体（仍以 messages 形式下发），
+  也不会改变分词表。特殊标记 [gMASK]、<sop>、<|system|>、<|user|>、<|assistant|>
+  均来自本目录的 extra_special_tokens。
+-#}
+{%- for message in messages -%}
+{%- if loop.first %}{{ '[gMASK]<sop>' }}{% endif -%}
+{%- if message['role'] == 'system' -%}
+{{ '<|system|>\n' + message['content'] }}
+{%- elif message['role'] == 'user' -%}
+{{ '<|user|>\n' + message['content'] }}
+{%- elif message['role'] == 'assistant' -%}
+{{ '<|assistant|>\n' + message['content'] }}
+{%- endif -%}
+{%- endfor -%}
+{%- if add_generation_prompt %}{{ '<|assistant|>\n' }}{% endif -%}

@@ -32,24 +32,58 @@ const cfg = computed(() => (snap.value && snap.value.cfg) || {})
 const cfgRows = computed(() => {
   const c = cfg.value
   const text = (v) => (v === null || v === undefined || v === '' ? '—' : String(v))
-  return [
+  const isLong = c.prompt_mode === 'long'
+  const rows = [
     { k: '任务名称', v: text(c.name) },
     { k: '说明', v: text(c.description) },
     { k: '服务端点', v: text(c.endpoint) },
     { k: 'API Key', v: text(c.api_key) },
     { k: '模型名', v: text(c.model) },
-    { k: 'max_tokens', v: text(c.max_tokens) },
+    { k: '请求模式', v: isLong ? '长序列 + 固定前缀（Prefix Cache）' : '自定义会话提问' },
+  ]
+  if (isLong) {
+    const custom = Boolean(c.prefix_content_chars)
+    rows.push(
+      { k: '分词器路径', v: text(c.tokenizer_path) },
+      { k: '序列长度', v: c.seq_length ? `${c.seq_length} tokens` : '—' },
+      { k: '输出长度', v: c.output_length ? `${c.output_length} tokens` : '—' },
+      {
+        k: 'Prefix Cache 命中率',
+        v: custom ? '按前缀内容自动' : c.prefix_cache_ratio === null ? '—' : pct(c.prefix_cache_ratio),
+      },
+      {
+        k: '固定前缀长度',
+        v: custom
+          ? '自动（序列长度 − 提问长度）'
+          : c.prefix_length === null || c.prefix_length === undefined
+            ? '—'
+            : `${c.prefix_length} tokens`,
+      },
+      {
+        k: '固定前缀内容',
+        v: custom ? `已填写（${c.prefix_content_chars} 字符）` : '未填写（使用共享随机前缀）',
+      },
+      { k: '预热请求数', v: text(c.warmup_num) },
+      { k: '强制输出长度', v: c.ignore_eos ? '是（ignore_eos）' : '否' },
+      { k: '提问内容', v: text(c.prompt) },
+    )
+  } else {
+    rows.push(
+      { k: 'max_tokens', v: text(c.max_tokens) },
+      { k: '系统提示词', v: text(c.system_prompt) },
+      { k: '提问内容', v: text(c.prompt) },
+      { k: '对话轮数', v: text(c.turns) },
+      { k: '会话唯一前缀', v: c.unique_prefix ? '是' : '否' },
+    )
+  }
+  rows.push(
     { k: 'temperature', v: text(c.temperature) },
     { k: 'top_p', v: text(c.top_p) },
     { k: 'top_k', v: c.top_k === -1 ? '-1（不发送）' : text(c.top_k) },
     { k: '请求超时', v: c.timeout === null || c.timeout === undefined ? '—' : `${c.timeout}s` },
-    { k: '系统提示词', v: text(c.system_prompt) },
-    { k: '提问内容', v: text(c.prompt) },
-    { k: '对话轮数', v: text(c.turns) },
-    { k: '会话唯一前缀', v: c.unique_prefix ? '是' : '否' },
     { k: '加压方式', v: c.concurrency_mode === 'ramp' ? '阶梯加压' : '固定并发' },
     { k: '并发用户数', v: text(c.concurrent_users) },
-    { k: '每个并发会话数', v: text(c.iterations) },
+    { k: isLong ? '每个并发请求数' : '每个并发会话数', v: text(c.iterations) },
     {
       k: '并发档位',
       v: Array.isArray(c.ramp_levels) && c.ramp_levels.length ? c.ramp_levels.join(' / ') : '—',
@@ -60,7 +94,8 @@ const cfgRows = computed(() => {
         ? '—'
         : `${c.ramp_pause_seconds}s`,
     },
-  ]
+  )
+  return rows
 })
 
 const chartSeries = [

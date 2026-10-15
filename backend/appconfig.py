@@ -110,6 +110,15 @@ def stress_defaults():
         "iterations": consts.DEFAULT_STRESS_ITERATIONS,
         "ramp_levels_text": consts.DEFAULT_STRESS_RAMP_LEVELS_TEXT,
         "ramp_pause_seconds": consts.DEFAULT_STRESS_RAMP_PAUSE_SECONDS,
+        "prompt_mode": consts.DEFAULT_STRESS_PROMPT_MODE,
+        "tokenizer_path": consts.DEFAULT_STRESS_TOKENIZER_PATH,
+        "seq_length": consts.DEFAULT_STRESS_SEQ_LENGTH,
+        "output_length": consts.DEFAULT_STRESS_OUTPUT_LENGTH,
+        "prefix_cache_ratio": consts.DEFAULT_STRESS_PREFIX_CACHE_RATIO,
+        "prefix_length": consts.DEFAULT_STRESS_PREFIX_LENGTH,
+        "prefix_content": consts.DEFAULT_STRESS_PREFIX_CONTENT,
+        "warmup_num": consts.DEFAULT_STRESS_WARMUP_NUM,
+        "ignore_eos": consts.DEFAULT_STRESS_IGNORE_EOS,
     }
     saved = load_last_cfg(LAST_STRESS_CFG_NAME)
     for k, v in saved.items():

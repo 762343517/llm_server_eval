@@ -101,9 +101,11 @@ export EVALSCOPE_BIN=/path/to/evalscope   # 非标准安装位置时指定
 
 | 表单项 | 含义 |
 | --- | --- |
+| 请求模式 | `自定义会话提问`（chat）或 `长序列 + 固定前缀`（long，见下节） |
 | 固定并发 | 单档压测：`--parallel` 为并发数，`--number` 为该档的会话数 |
 | 阶梯加压 | 每档一组 `--parallel` / `--number`，档位自动升序去重（最多 20 档、单档并发上限 1024） |
 | 阶梯停顿 | 档与档之间的休眠秒数（对应 `--sleep-interval`） |
+| 每个并发会话数 | 单个并发档位的会话数（`--number`）；long 模式下为请求数 |
 | 对话轮数 | >1 时数据集内重复多轮同一提问，历史中携带模型上一轮回答（长上下文/KV 缓存场景） |
 | 会话唯一前缀 | 每条会话首条 user 消息拼接 1024 字符随机前缀，关闭前缀缓存以测冷启动 |
 
@@ -114,6 +116,48 @@ export EVALSCOPE_BIN=/path/to/evalscope   # 非标准安装位置时指定
 evalscope 不会自动补全请求路径：端点只填到端口时自动补 `/v1/chat/completions`
 （如 `http://10.174.0.70:34000`），已带路径前缀（如 `/v1`、`/api/paas/v4`）时只追加
 `/chat/completions`。
+
+### 长序列与 Prefix Cache 命中率
+
+请求模式选 `长序列 + 固定前缀` 后，按「序列长度 + 固定前缀」两个维度组织载荷，
+所有请求共享同一段固定前缀，用固定前缀占序列长度的比例模拟 Prefix Cache 命中率：
+
+| 表单项 | 含义 |
+| --- | --- |
+| 序列长度 | 单次请求输入 tokens 总数，支持 `128000` / `128K` / `1M`（K=1000、M=1000000） |
+| 固定前缀长度 | 所有请求共享的前缀 tokens；填 0 时 = 序列长度 × 命中率 |
+| Prefix Cache 命中率 | 固定前缀 / 序列长度，变长后缀 = 序列长度 − 固定前缀（两个字段择一填写，显式长度优先） |
+| 固定前缀内容 | 可选。留空则由 evalscope 生成共享随机前缀（长度精确可控）；填写后以该正文为素材补齐成固定前缀 |
+| 分词器路径 | 必需。evalscope 按 token 精确生成长序列，需与被测模型同一词表的分词器 |
+| 输出长度 | 映射 `--min-tokens` / `--max-tokens`，固定输出长度使 TPOT 口径一致 |
+| 预热请求数 | 先发若干请求把共享前缀写入缓存再统计（建议不小于并发数，0 = 关闭） |
+| 强制输出长度 | `--extra-args '{"ignore_eos": true}'`，忽略停止符按输出长度生成 |
+
+对应的 evalscope 参数：
+
+- 留空固定前缀内容 → `--dataset random`，`--prefix-length` 为共享前缀 token 数，
+  `--min/max-prompt-length` 为变长后缀长度；每个请求的后缀各不相同，共享前缀完全一致；
+- 填写固定前缀内容 → `--dataset line_by_line` + `--dataset-args`（`prefix_file`
+  指向任务目录的 `prefix.txt`，`target_input_len` 为序列长度、`input_len_mode=cap`），
+  前缀正文会被补齐到「序列长度 − 提问长度」，各请求前缀一致、后缀为 `prompts.txt`
+  中的各行（当前写入表单里的那一条提问，即各请求内容相同）。
+
+分词器要求（实测 GLM-5.3 已满足）：
+
+- 目录里必须有对话模板 —— `chat_template.jinja` 或 `tokenizer_config.json` 的
+  `chat_template` 字段。evalscope 会在客户端套用一次模板来估算 prompt token 数
+  （`random` 数据集必须扣除模板开销），缺少模板会直接报
+  `tokenizer.chat_template is not set`；缺少模板时后端会在启动前拦住并给出提示。
+  仓库内的 `model/GLM-5.3/chat_template.jinja` 即为此用途，只影响客户端计数，
+  不改变分词表与发给服务端的请求体；
+- 词表需与被测模型一致。用 `model/GLM-5.3` 对比 GLM 服务返回的 `usage.prompt_tokens`，
+  不同内容长度下的差值恒为模板开销（14），即内容 token 数完全对齐，序列长度可按
+  token 精确控制（实测 2048 的配置，服务端实际收到 2048）。
+
+long 模式为**单轮**请求：`--number` 即请求数（不再按会话数 × 轮次换算），进度与
+预计请求数也按单轮口径统计。预热请求不写入结果库，平台指标只统计有效请求。
+
+页面提供 `128K / 1024K` × `命中率 50% / 90%` 四个预设按钮，一键套用测试方案中的组合。
 
 ### 指标口径
 
@@ -133,6 +177,8 @@ evalscope 不会自动补全请求路径：端点只填到端口时自动补 `/v
 `runs/stress/<run_id>/`：
 
 - `dataset.jsonl`：交给 evalscope 的自定义会话数据集（每行一条 `messages` 数组）；
+- `prompts.txt` / `prefix.txt`：长序列 + 固定前缀内容模式下的逐行提问与固定前缀正文
+  （`line_by_line` 数据集 + `prefix_file`）；固定前缀在 `meta.json` 中只保留字符数；
 - `args.json`：本次运行的完整命令行与参数（含密钥，权限 600，页面展示时脱敏）；
 - `perf/<档位目录>/benchmark_data.db`：evalscope 的 SQLite 结果库，以
   `--db-commit-interval 1` 逐行提交，后端据此边跑边读，实时刷新进度、曲线与明细；
