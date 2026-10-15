@@ -167,9 +167,17 @@ long 模式为**单轮**请求：`--number` 即请求数（不再按会话数 ×
 - `ttft_*`：首字延迟（evalscope 的 `first_chunk_latency`）；`tpot_mean_s`：每输出
   token 耗时（`time_per_output_token`）；
 - `e2e_*`：端到端延迟（`latency`）；`tokens_per_second_mean`：单请求输出速度；
-  `total_tokens_per_second`：集群输出速度；`requests_per_second`：吞吐（含失败请求）；
+  `total_tokens_per_second`：输出吞吐（对应日志的 Output Throughput）；
+  `overall_tokens_per_second`：输入 + 输出总吞吐（对应日志的 Total Throughput，长序列下
+  输入占绝大部分，该值远大于输出吞吐，两者不可混看）；
+  `requests_per_second`：吞吐（含失败请求）；
 - `total_duration_s`：最早请求开始 → 最晚请求结束（并发场景下不等于墙钟耗时）；
-- P95 沿用升级前的 `quantiles(n=20)[18]` 口径，便于与历史结果对比；
+- 分位数（均值同 evalscope 一样按全部成功请求计数）用**最近秩法** `ceil(n·p) − 1` 取值，
+  与 evalscope 写进 `benchmark.log` 的分位表逐值一致；
+- TTFT 只有 evalscope 解析到流的**非空增量文本**时才会记录，未记到时库里是 0。此时页面
+  明细显示 `—`（聚合值仍按 evalscope 口径除以全部请求，与日志的 Avg TTFT 一致）；
+  阶梯/长序列场景若多数请求没有 TTFT，先确认服务端流式返回的 `delta.content` /
+  `reasoning_content` 是否为空；
 - 多轮场景额外给出逐轮 TTFT/端到端与上下文增长系数；evalscope 不采集目标侧 KV cache
   指标，相关列（`kv_cache_usage` / `cache_hit_rate`）为空。
 

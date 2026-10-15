@@ -313,6 +313,7 @@ class StressRun:
                 "expected": self.expected,
                 "stats": self.stats,
                 "summary": self.summary,
+                "stats_version": perf_core.STATS_VERSION,
                 "conv": self.conv,
                 "by_level": self.by_level,
                 "args_text": _mask_text(self.args_text) if self.args_text else None,
@@ -540,9 +541,40 @@ class StressManager:
         if not os.path.isfile(path):
             return None
         try:
-            return rm.load_snapshot(path)
+            snap = rm.load_snapshot(path)
         except (OSError, ValueError):
             return None
+        return self._refresh_stats(run_id, snap, path)
+
+    def _refresh_stats(self, run_id, snap, path):
+        """按当前口径重算历史快照的汇总指标并回写。
+
+        meta.json 里的 stats/summary/by_level 只是结果库的缓存，口径升级（分位算法、
+        吞吐字段）后旧缓存会与 benchmark.log 对不上。这里按 `stats_version` 判断，
+        落后就用结果库重算一次并写回，之后读盘不再重算；重算失败时保留原值。
+        """
+        if snap.get("stats_version") == perf_core.STATS_VERSION:
+            return snap
+        run_dir = os.path.join(self.base, run_id)
+        try:
+            records, _ = perf_core.read_records(run_dir, snap.get("cfg") or {}, run_id)
+        except Exception:                   # noqa: BLE001 结果库损坏/权限问题不该影响读快照
+            return snap
+        if not records:
+            return snap
+        stats = perf_core.aggregate(records)
+        snap["stats"] = stats
+        snap["summary"] = stats
+        snap["by_level"] = perf_core.by_level(records)
+        snap["stats_version"] = perf_core.STATS_VERSION
+        tmp = path + ".tmp"
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(snap, f, ensure_ascii=False, indent=2)
+            os.replace(tmp, path)
+        except OSError:
+            pass
+        return snap
 
     def list_runs(self, limit=200):
         """合并内存中的任务与磁盘上的历史任务，按开始时间倒序排列。"""

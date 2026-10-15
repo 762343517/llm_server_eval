@@ -24,6 +24,7 @@ evalscope 1.13 关键行为（本项目依赖的部分）：
 两种数据集都是单轮请求，`--number` 即请求数（不按会话数 × 轮次换算）。
 """
 import json
+import math
 import os
 import random
 import re
@@ -71,6 +72,11 @@ DEFAULT_LONG_QUESTION = "请用一句话介绍你自己。"
 # 启动前目标连通性预检的超时（秒）：只做一次 TCP 握手，不发 HTTP、不消耗 token。
 # 用于在 evalscope 的 connect_test 之前给出结论，避免地址填错时白等 --total-timeout。
 PRECHECK_TIMEOUT = 3.0
+
+# 汇总指标口径版本，写进任务快照；版本落后时由 perf_manager 用结果库重算并回写。
+# v2：分位由 quantiles 插值改为最近秩（与 benchmark.log 一致）；
+#     新增 overall_tokens_per_second（含输入的总吞吐）。
+STATS_VERSION = 2
 
 _PROBE = {"at": 0.0, "info": None}
 _PROBE_TTL = 60.0
@@ -725,17 +731,28 @@ def read_records(run_dir, cfg=None, run_id="", after=None):
 
 
 # --------------------------------------------------------------------- 指标聚合
-def _p95(values):
-    """P95：quantiles(n=20) 的第 18 个分位（沿用升级前的口径，便于历史对比）。"""
-    if not values:
+def _nearest_rank(values, percentile):
+    """最近秩分位：与 evalscope 写进 benchmark.log 的分位表口径一致。
+
+    evalscope 取 `ceil(n * p) - 1` 号样本（见 evalscope/perf/utils/db_util.py），
+    因此分位值必然是真实样本之一；此前用 statistics.quantiles 做线性插值，
+    会算出日志里根本不存在的数（例如 20 条样本里 19 条 TTFT 缺失、只有一条
+    17.692s 时，插值得到 P95 = 16.807s，而日志的 TTFT 95% 分位是 0、99% 才是
+    17.692s），页面与 benchmark.log 对不上。
+    """
+    ordered = sorted(_num(v) for v in values)
+    if not ordered:
         return 0.0
-    if len(values) < 2:
-        return values[0]
-    return statistics.quantiles(values, n=20)[18]
+    rank = math.ceil(percentile * len(ordered) / 100)
+    return ordered[min(max(rank, 1), len(ordered)) - 1]
+
+
+def _p95(values):
+    return _nearest_rank(values, 95)
 
 
 def _p50(values):
-    return statistics.median(values) if values else 0.0
+    return _nearest_rank(values, 50)
 
 
 def estimate_duration(records):
@@ -792,7 +809,11 @@ def aggregate(records):
         "e2e_mean_s": statistics.mean(e2e) if e2e else 0.0,
         "e2e_p95_s": _p95(e2e),
         "tokens_per_second_mean": statistics.mean(tps) if tps else 0.0,
+        # 仅输出 token，对应 benchmark.log 的 Output Throughput
         "total_tokens_per_second": (completion / duration) if duration else 0.0,
+        # 输入 + 输出，对应 benchmark.log 的 Total Throughput（长序列下远大于输出吞吐）
+        "overall_tokens_per_second": ((prompt_tokens + completion) / duration)
+        if duration else 0.0,
         "requests_per_second": (total / duration) if duration else 0.0,
         "total_duration_s": duration,
         "prompt_tokens_total": prompt_tokens,

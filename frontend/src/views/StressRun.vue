@@ -118,6 +118,11 @@ const cfgRows = computed(() => {
   return rows
 })
 
+// evalscope 只在解析到流的**非空增量文本**后才记 TTFT，未记到时落库为 0。
+// 直接显示 0.000 会被读成"首字瞬时返回"，这里如实标为无数据（聚合值口径不变，
+// 与 benchmark.log 的 Avg TTFT 一致）。
+const ttftText = (row) => (Number(row.ttft_s) > 0 ? shortFixed(row.ttft_s, 3) : '—')
+
 const chartSeries = [
   { key: 'rps', label: 'RPS', color: '#2563eb', digits: 2 },
   { key: 'ttft_mean_s', label: '首字延迟(s)', color: '#d97706', digits: 3 },
@@ -265,8 +270,21 @@ onUnmounted(() => timer && clearInterval(timer))
       <StatTile label="端到端 P95" :value="shortFixed(metrics.e2e_p95_s, 2)" sub="s" />
       <StatTile label="TPOT 均值" :value="shortFixed(metrics.tpot_mean_s, 4)" sub="s/token" />
       <StatTile label="单请求输出" :value="num(metrics.tokens_per_second_mean, 1)" sub="tokens/s" />
-      <StatTile label="集群输出" :value="num(metrics.total_tokens_per_second, 1)" sub="tokens/s" />
-      <StatTile label="输出 token" :value="compact(metrics.completion_tokens_total)" />
+      <StatTile
+        label="输出吞吐"
+        :value="num(metrics.total_tokens_per_second, 1)"
+        sub="tokens/s · 仅输出"
+      />
+      <StatTile
+        label="总吞吐"
+        :value="num(metrics.overall_tokens_per_second, 1)"
+        sub="tokens/s · 含输入"
+      />
+      <StatTile
+        label="输出 token"
+        :value="compact(metrics.completion_tokens_total)"
+        sub="全部请求合计"
+      />
       <StatTile label="压测总时长" :value="duration(metrics.total_duration_s)" />
     </div>
   </section>
@@ -409,7 +427,7 @@ onUnmounted(() => timer && clearInterval(timer))
                 {{ row.success ? '成功' : '失败' }}
               </span>
             </td>
-            <td class="num">{{ shortFixed(row.ttft_s, 3) }}</td>
+            <td class="num">{{ ttftText(row) }}</td>
             <td class="num">{{ shortFixed(row.tpot_s, 4) }}</td>
             <td class="num">{{ shortFixed(row.e2e_latency_s, 2) }}</td>
             <td class="num">{{ int(row.prompt_tokens) }}</td>
