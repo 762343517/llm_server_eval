@@ -35,6 +35,7 @@ import statistics
 import string
 import subprocess
 import sys
+import threading
 import time
 from datetime import datetime, timedelta
 from urllib.parse import urlsplit
@@ -69,6 +70,12 @@ DATASET_LINE = "line_by_line"
 LONG_DATASET_FILE = "prompts.txt"         # line_by_line 的逐行提问文件
 PREFIX_FILE = "prefix.txt"                # 固定前缀内容落盘文件
 TOKEN_SUFFIXES = (("k", 1000), ("m", 1000000))   # 序列长度写法：128K = 128000
+
+# 分词器索引：model/ 下的扫描结果缓存（见 list_tokenizers），避免每次请求都遍历目录、
+# 解析 tokenizer_config.json（分词器目录可达数十 MB，重复扫盘对接口延迟影响明显）。
+TOKENIZER_INDEX_NAME = "tokenizers.json"
+TOKENIZER_INDEX_VERSION = 2                    # 索引结构版本，结构变更时 +1 触发重建
+GENERATED_TEMPLATE_FILE = "chat_template.jinja"    # 缺对话模板时自动补齐的文件名
 
 # 逐行提交的缓冲行数：越小实时性越好，越大写入开销越小。
 # 取 1 是为了让运行中的进度/明细能立即读到（evalscope 的写入在独立线程，开销可控）。
@@ -359,25 +366,178 @@ def dataset_file(cfg, run_dir):
     return os.path.join(str(run_dir), DATASET_FILE)
 
 
-def has_chat_template(path):
-    """本地分词器目录是否带对话模板（tokenizer_config.json 字段或 chat_template.jinja）。"""
+# ------------------------------------------------------- 对话模板与分词器索引
+# 自动生成的兜底模板：只在分词器目录既没有 chat_template.jinja、tokenizer_config.json
+# 也没有 chat_template 字段时按目录名族系生成，仅用于 evalscope 在客户端估算 prompt
+# token 数（不改变分词表，也不改变发给服务端的请求体）。
+DEEPSEEK_CHAT_TEMPLATE = (
+    "{% if not add_generation_prompt is defined %}"
+    "{% set add_generation_prompt = false %}{% endif %}"
+    "{{ bos_token }}"
+    "{% for message in messages %}"
+    "{% if message['role'] == 'user' %}{{ 'User: ' + message['content'] + '\\n\\n' }}"
+    "{% elif message['role'] == 'assistant' %}"
+    "{{ 'Assistant: ' + message['content'] + eos_token }}"
+    "{% elif message['role'] == 'system' %}{{ message['content'] + '\\n\\n' }}"
+    "{% endif %}"
+    "{% endfor %}"
+    "{% if add_generation_prompt %}{{ 'Assistant:' }}{% endif %}"
+)
+CHATML_CHAT_TEMPLATE = (
+    "{% for message in messages %}"
+    "{{ '<|im_start|>' + message['role'] + '\\n' + message['content'] + "
+    "'<|im_end|>' + '\\n' }}"
+    "{% endfor %}"
+    "{% if add_generation_prompt %}{{ '<|im_start|>assistant\\n' }}{% endif %}"
+)
+# 目录名（小写）包含关键字即视为该族系；未命中时用 ChatML 兜底
+TEMPLATE_FAMILIES = (("deepseek", DEEPSEEK_CHAT_TEMPLATE),)
+FALLBACK_TEMPLATE_FAMILY = "chatml"
+GENERATED_TEMPLATE_MARK = "自动生成的对话模板"
+GENERATED_TEMPLATE_HEADER = """{#-
+""" + GENERATED_TEMPLATE_MARK + """（zhipuEval，族系：{family}）。
+
+本目录原本没有对话模板（tokenizer_config.json 无 chat_template 字段，也没有
+chat_template.jinja），而 evalscope 按 token 生成长序列时必须在客户端套用一次模板来
+估算 prompt token 数，缺失会直接报错，因此按最接近该词表的族系模板自动补齐。
+
+该模板只影响客户端计数，不会改变分词表与请求体。若与线上服务实际使用的模板不一致，
+请直接用官方模板覆盖本文件。
+-#}
+"""
+
+_INDEX_LOCK = threading.Lock()
+_INDEX_CACHE = {"signature": None, "items": None}
+_TEMPLATE_COMMENT = re.compile(r"\{#.*?#\}", re.S)
+
+
+def _template_text_ok(text):
+    """jinja 文件是否含有效模板：去掉注释块后仍有内容才算有模板。"""
+    return bool(_TEMPLATE_COMMENT.sub("", text).strip())
+
+
+def _template_source(path):
+    """已有对话模板的来源：tokenizer_config / file / generated；都没有时返回 None。"""
     config = os.path.join(path, "tokenizer_config.json")
     if os.path.isfile(config):
         try:
             with open(config, encoding="utf-8") as fh:
                 if str(json.load(fh).get("chat_template") or "").strip():
-                    return True
+                    return "tokenizer_config"
         except (OSError, ValueError):
-            return True                     # 读不出来时不误判，交给 evalscope 报错
-    return os.path.isfile(os.path.join(path, "chat_template.jinja"))
+            return "tokenizer_config"       # 读不出来时不误判，交给 evalscope 报错
+    target = os.path.join(path, GENERATED_TEMPLATE_FILE)
+    if not os.path.isfile(target):
+        return None
+    try:
+        with open(target, encoding="utf-8") as fh:
+            text = fh.read()
+    except OSError:
+        return "file"
+    if not _template_text_ok(text):
+        return None         # 空文件 / 只剩注释：视为没有模板，交给 ensure 重新生成
+    return "generated" if GENERATED_TEMPLATE_MARK in text else "file"
 
 
-def list_tokenizers():
-    """枚举 model/ 目录下可用作分词器的模型目录（含 tokenizer.json 或 tokenizer_config.json）。
+def has_chat_template(path):
+    """本地分词器目录是否带对话模板（tokenizer_config.json 字段或 chat_template.jinja）。"""
+    return _template_source(path) is not None
 
-    分词器根目录固定为项目内的 model/（consts.MODEL_DIR）：页面下拉框的候选来自这里，
-    提交时也只接受该目录下的本地路径，避免分词器散落各处导致压测口径不一致。
+
+def _family_template(name):
+    """按目录名挑一个族系兜底模板，返回 (模板文本, 族系名)。"""
+    lowered = name.lower()
+    for family, template in TEMPLATE_FAMILIES:
+        if family in lowered:
+            return template, family
+    return CHATML_CHAT_TEMPLATE, FALLBACK_TEMPLATE_FAMILY
+
+
+def ensure_chat_template(path):
+    """确保分词器目录带对话模板：缺失时按族系生成 chat_template.jinja。
+
+    返回模板来源（tokenizer_config / file / generated）；生成失败（目录不可写）时返回
+    None，由调用方决定是否拦截。evalscope 缺少模板会直接报
+    `tokenizer.chat_template is not set`，所以这里主动补齐。
     """
+    source = _template_source(path)
+    if source:
+        return source
+    name = os.path.basename(os.path.normpath(path))
+    template, family = _family_template(name)
+    target = os.path.join(path, GENERATED_TEMPLATE_FILE)
+    tmp = target + ".tmp"
+    payload = GENERATED_TEMPLATE_HEADER.replace("{family}", family) + template + "\n"
+    try:
+        # 先写临时文件再原子替换：避免中断时留下半截模板被当成可用模板
+        with open(tmp, "w", encoding="utf-8") as fh:
+            fh.write(payload)
+        os.replace(tmp, target)
+    except OSError:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        return None
+    return "generated"
+
+
+def _tokenizer_signature():
+    """model/ 的轻量指纹（子目录名 + mtime），用于判断索引缓存是否失效。
+
+    只做 scandir + stat，不打开任何分词器文件，因此即使每次调用开销也可忽略。
+    """
+    signature = {}
+    try:
+        with os.scandir(consts.MODEL_DIR) as entries:
+            for entry in entries:
+                try:
+                    if entry.is_dir():
+                        signature[entry.name] = entry.stat().st_mtime_ns
+                except OSError:
+                    continue
+    except OSError:
+        return {}
+    return signature
+
+
+def _index_file():
+    return os.path.join(consts.MODEL_DIR, TOKENIZER_INDEX_NAME)
+
+
+def _read_index(signature):
+    """读取 model/tokenizers.json；版本或指纹不匹配时返回 None（触发重建）。"""
+    try:
+        with open(_index_file(), encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    if data.get("version") != TOKENIZER_INDEX_VERSION:
+        return None
+    if data.get("signature") != signature or not isinstance(data.get("tokenizers"), list):
+        return None
+    return data["tokenizers"]
+
+
+def _write_index(signature, items):
+    """把扫描结果写回配置文件；写失败不影响功能（索引只是缓存）。"""
+    payload = {
+        "version": TOKENIZER_INDEX_VERSION,
+        "root": consts.MODEL_DIR,
+        "updated_at": datetime.now().isoformat(timespec="seconds"),
+        "signature": signature,
+        "tokenizers": items,
+    }
+    try:
+        with open(_index_file(), "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, ensure_ascii=False, indent=2)
+            fh.write("\n")
+    except OSError:
+        pass
+
+
+def _scan_tokenizers():
+    """真正扫盘：枚举 model/ 下可用分词器，并为缺模板的目录生成对话模板。"""
     items = []
     try:
         names = sorted(os.listdir(consts.MODEL_DIR))
@@ -390,11 +550,39 @@ def list_tokenizers():
         if not any(os.path.isfile(os.path.join(path, f))
                    for f in ("tokenizer.json", "tokenizer_config.json")):
             continue
+        source = ensure_chat_template(path)
         items.append({"name": name, "path": path,
-                      "has_chat_template": has_chat_template(path)})
+                      "has_chat_template": source is not None,
+                      "template_source": source or "missing"})
     # 带对话模板的排前面：长序列模式要求分词器能套模板估算 prompt token 数
     items.sort(key=lambda it: (not it["has_chat_template"], it["name"]))
     return items
+
+
+def list_tokenizers(force=False):
+    """枚举 model/ 目录下可用作分词器的模型目录（含 tokenizer.json 或 tokenizer_config.json）。
+
+    分词器根目录固定为项目内的 model/（consts.MODEL_DIR）：页面下拉框的候选来自这里，
+    提交时也只接受该目录下的本地路径，避免分词器散落各处导致压测口径不一致。
+
+    结果走三级缓存，避免每次请求都扫盘：内存 → model/tokenizers.json（跨进程复用）→
+    重新扫描并回写索引。目录新增/改名/删除（指纹变化）时自动重建；force=True 强制重扫。
+    """
+    signature = _tokenizer_signature()
+    with _INDEX_LOCK:
+        cached = _INDEX_CACHE["items"]
+        if not force and cached is not None and _INDEX_CACHE["signature"] == signature:
+            items = cached
+        else:
+            items = None if force else _read_index(signature)
+            if items is None:
+                items = _scan_tokenizers()
+                # 生成模板会改写子目录 mtime，这里重算指纹，避免下次请求又判定失效
+                signature = _tokenizer_signature()
+                _write_index(signature, items)
+            _INDEX_CACHE["signature"] = signature
+            _INDEX_CACHE["items"] = items
+        return [dict(it) for it in items]
 
 
 def default_tokenizer():
@@ -421,8 +609,9 @@ def validate_tokenizer(tokenizer):
 
     只检查绝对路径（模型 ID 形式的远程分词器无法在本地校验）。evalscope 会用
     `--tokenizer-path` 指向的分词器在客户端套用一次对话模板来估算 prompt token 数
-    （random 数据集必须扣除模板开销），因此分词器目录必须带 chat template；本仓库
-    的 model/GLM-5.3 已随附 chat_template.jinja。
+    （random 数据集必须扣除模板开销），因此分词器目录必须带 chat template：目录里没有
+    模板时由 `ensure_chat_template` 按族系自动生成 chat_template.jinja（见
+    list_tokenizers 的说明），只有目录不可写才会在这里拦截。
     """
     if not os.path.isabs(tokenizer):
         return
@@ -432,11 +621,12 @@ def validate_tokenizer(tokenizer):
             "或在页面上从下拉框选择）".format(consts.MODEL_DIR))
     if not os.path.isdir(tokenizer):
         raise ValueError("分词器路径不存在：{}".format(tokenizer))
-    if not has_chat_template(tokenizer):
+    if not ensure_chat_template(tokenizer):
         raise ValueError(
-            "分词器目录缺少对话模板：evalscope 需要它在客户端估算 prompt token 数，"
-            "请在 {} 下添加 chat_template.jinja（或 tokenizer_config.json 的 "
-            "chat_template 字段）".format(tokenizer))
+            "分词器目录缺少对话模板且无法自动生成（目录不可写？）：evalscope 需要它在"
+            "客户端估算 prompt token 数，请确认 {} 可写，或手动添加 "
+            "chat_template.jinja（或 tokenizer_config.json 的 chat_template 字段）".format(
+                tokenizer))
 
 
 def validate(cfg):

@@ -55,10 +55,12 @@ const iterations = computed(() => Math.max(0, parseInt(form.iterations, 10) || 0
 // 分词器候选：后端固定扫描项目 model/ 目录；历史配置里的路径已不在候选中时单独列出，
 // 避免打开页面就被静默改写成别的分词器
 const tokenizerOptions = computed(() => {
-  const items = store.tokenizers.map((t) => ({
-    value: t.path,
-    label: t.has_chat_template ? t.name : `${t.name}（缺少对话模板）`,
-  }))
+  const items = store.tokenizers.map((t) => {
+    let label = t.name
+    if (!t.has_chat_template) label += '（缺少对话模板）'
+    else if (t.template_source === 'generated') label += '（模板自动生成）'
+    return { value: t.path, label }
+  })
   const current = String(form.tokenizer_path || '').trim()
   if (current && !items.some((t) => t.value === current)) {
     items.unshift({ value: current, label: `${current}（历史配置）` })

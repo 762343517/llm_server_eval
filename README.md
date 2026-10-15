@@ -163,6 +163,17 @@ token 数、`--min/max-prompt-length` 为变长后缀长度，各请求前缀一
 校验本地路径必须位于该目录内（`perf_core.validate_tokenizer`），放到别处会被拒绝并提示。
 新增分词器只需把整个模型目录拷进 `model/`，刷新页面即可在下拉框里看到。
 
+扫描结果缓存在 `model/tokenizers.json`（记录各子目录的 mtime 指纹）：请求先命中进程内
+缓存，服务重启后直接读该文件，只有目录新增/改名/删除（指纹变化）或索引结构版本升级时才
+重新扫盘并回写，避免每次打开页面或提交都遍历分词器目录。该文件是自动生成的缓存，可随时
+删除，下次请求会重建。
+
+目录里没有对话模板（`tokenizer_config.json` 无 `chat_template` 字段、也没有
+`chat_template.jinja`）时，后端按目录名匹配族系（`deepseek*` → DeepSeek 风格 `User:/
+Assistant:` 模板，其余 → ChatML）自动生成 `chat_template.jinja`，省去手工准备模板；下拉框
+会给这类目录标注「模板自动生成」。生成的文件只影响客户端计数，若与线上服务真实使用的模板
+不一致，直接用官方模板覆盖同名文件即可（文件头部的注释标记用于识别「自动生成」）。
+
 分词器要求（实测 GLM-5.3 满足）：
 
 - 目录内需有对话模板（`chat_template.jinja` 或 `tokenizer_config.json` 的 `chat_template`）：
