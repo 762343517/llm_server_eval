@@ -4,7 +4,7 @@ import { RouterLink, useRouter } from 'vue-router'
 import { api } from '../api'
 import { store } from '../store'
 import { ProgressBar, StatTile, StatusBadge } from '../components/index.js'
-import { compact, duration, int, isRunning, num, pct, shortFixed } from '../format'
+import { compact, duration, int, isRunning, ms, num, pct } from '../format'
 
 const router = useRouter()
 const form = reactive({})
@@ -427,7 +427,7 @@ onUnmounted(() => timer && clearInterval(timer))
             <th>进度</th>
             <th class="num">RPS</th>
             <th class="num">成功率</th>
-            <th class="num">TTFT 均值 / P95</th>
+            <th class="num">TTFT 均值 / P95 (ms)</th>
             <th class="num">耗时</th>
             <th style="width: 210px">操作</th>
           </tr>
@@ -465,8 +465,7 @@ onUnmounted(() => timer && clearInterval(timer))
             <td class="num">{{ num((run.stats || {}).requests_per_second, 2) }}</td>
             <td class="num">{{ pct((run.stats || {}).success_rate) }}</td>
             <td class="num">
-              {{ shortFixed((run.stats || {}).ttft_mean_s, 3) }} /
-              {{ shortFixed((run.stats || {}).ttft_p95_s, 3) }}
+              {{ ms((run.stats || {}).ttft_mean_s) }} / {{ ms((run.stats || {}).ttft_p95_s) }}
             </td>
             <td class="num">{{ duration(run.duration_s) }}</td>
             <td>

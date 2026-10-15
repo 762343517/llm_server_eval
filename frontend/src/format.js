@@ -23,6 +23,13 @@ export const shortFixed = (value, digits = 3) => {
   return n.toFixed(digits)
 }
 
+// 秒 → 毫秒文本：TTFT / TPOT 等时延指标统一按毫秒展示
+export const ms = (seconds, digits = 1) => {
+  const n = Number(seconds)
+  if (seconds === null || seconds === undefined || seconds === '' || Number.isNaN(n)) return '—'
+  return (n * 1000).toFixed(digits)
+}
+
 // 秒 → 1h 02m / 03m 12s / 12.3s
 export const duration = (seconds) => {
   const s = Number(seconds)

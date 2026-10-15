@@ -615,6 +615,12 @@ class StressManager:
         path = os.path.join(self.base, run_id, ARGS_NAME)
         return path if os.path.isfile(path) else None
 
+    def run_dir(self, run_id):
+        """任务目录；run_id 非法时返回 None（调用方据此返回 404）。"""
+        if not rm.RUN_ID_RE.match(run_id or ""):
+            return None
+        return os.path.join(self.base, run_id)
+
     # ---------------------------------------------------------------- 控制
     def stop(self, run_id):
         """停止任务，返回是否已停止；内存句柄丢失时按落盘的进程组接管。

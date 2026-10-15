@@ -22,7 +22,7 @@ const evalscopeText = computed(() => {
 <template>
   <header class="topbar">
     <div class="brand">
-      SimpleQA-Verified 评测平台
+      大模型服务测试平台
       <small>精度测试 · 压力测试</small>
     </div>
     <nav class="tabs">

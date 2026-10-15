@@ -3,7 +3,7 @@ import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { RouterLink, useRoute, useRouter } from 'vue-router'
 import { api } from '../api'
 import { KvList, LogPanel, ProgressBar, StatTile, StatusBadge } from '../components/index.js'
-import { compact, duration, int, isRunning, num, pct, shortFixed } from '../format'
+import { compact, duration, int, isRunning, ms, num, pct, shortFixed } from '../format'
 
 const route = useRoute()
 const router = useRouter()
@@ -237,7 +237,7 @@ onUnmounted(() => timer && clearInterval(timer))
             <th>标准答案</th>
             <th>主题</th>
             <th class="num">token(总/思考)</th>
-            <th class="num">首字s</th>
+            <th class="num">首字(ms)</th>
             <th class="num">总耗时s</th>
             <th class="center">结束原因</th>
           </tr>
@@ -258,7 +258,7 @@ onUnmounted(() => timer && clearInterval(timer))
             <td class="num">
               {{ int(row.completion_tokens) }} / {{ int(row.reasoning_tokens) }}
             </td>
-            <td class="num">{{ shortFixed(row.ttft_s) }}</td>
+            <td class="num">{{ ms(row.ttft_s) }}</td>
             <td class="num">{{ shortFixed(row.total_s) }}</td>
             <td class="center">{{ row.finish_reason || '—' }}</td>
           </tr>

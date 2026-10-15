@@ -47,6 +47,14 @@ DEFAULT_API_PATH = "/v1/chat/completions"
 RESULT_DB_NAME = "benchmark_data.db"
 RUN_NAME = "perf"
 
+# evalscope 原始产物（写在 <run_dir>/perf 下）：(文件名, 展示名, 类型)
+# 类型 text 供在线文本预览，html 供内嵌渲染；三者均支持下载。
+RESULT_FILES = (
+    ("benchmark.log", "evalscope 运行日志", "text"),
+    ("performance_summary.txt", "性能汇总报告", "text"),
+    ("perf_report.html", "可视化报告", "html"),
+)
+
 # 请求模式：chat = 自定义会话提问；long = 长序列 + 固定前缀（Prefix Cache 命中率）
 MODE_CHAT = "chat"
 MODE_LONG = "long"
@@ -623,6 +631,45 @@ def _result_dbs(run_dir):
             out.append((_level_of_dir(root), os.path.join(root, RESULT_DB_NAME)))
     out.sort(key=lambda item: (item[0], item[1]))
     return out
+
+
+def list_result_files(run_dir):
+    """列出可在线查看/下载的 evalscope 原始产物（相对任务目录的路径）。
+
+    evalscope 以 `--outputs-dir <run_dir> --name perf` 运行，三类报告都落在
+    `<run_dir>/perf/` 下；这里只暴露白名单内的文件，避免把结果库等大文件透出去。
+    """
+    out = []
+    for name, label, kind in RESULT_FILES:
+        path = os.path.join(os.path.abspath(run_dir), RUN_NAME, name)
+        if not os.path.isfile(path):
+            continue
+        try:
+            st = os.stat(path)
+        except OSError:
+            continue
+        out.append({
+            "path": "{}/{}".format(RUN_NAME, name),
+            "name": name,
+            "label": label,
+            "kind": kind,
+            "size": st.st_size,
+            "mtime": int(st.st_mtime),
+        })
+    return out
+
+
+def result_file(run_dir, rel_path):
+    """把相对路径解析为白名单内文件的真实路径，非法或不存在时抛 ValueError。"""
+    norm = os.path.normpath(str(rel_path or "").strip().lstrip("/")).replace(os.sep, "/")
+    allowed = {"{}/{}".format(RUN_NAME, name) for name, _label, _kind in RESULT_FILES}
+    if norm not in allowed:
+        raise ValueError("不支持的文件：{}".format(rel_path or ""))
+    root = os.path.realpath(os.path.join(os.path.abspath(run_dir), RUN_NAME))
+    path = os.path.realpath(os.path.join(os.path.abspath(run_dir), norm))
+    if not path.startswith(root + os.sep) or not os.path.isfile(path):
+        raise ValueError("文件不存在：{}".format(norm))
+    return path
 
 
 def _request_turn(raw):

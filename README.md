@@ -1,7 +1,7 @@
 # 大模型服务精度与性能测试框架
 
-面向**本地部署大模型服务**的评测平台，采用前端 Vue3 + 后端 FastAPI 的前后端分离架构，
-包含两个 Tab：
+**大模型服务测试平台**，面向本地部署的大模型服务，采用前端 Vue3 + 后端 FastAPI 的
+前后端分离架构，包含两个 Tab：
 
 - **精度测试**：SimpleQA-Verified / HLE 数据集逐题作答 → LLM 裁判判分 → 汇总 Pass@1；
 - **压力测试**：调用 [EvalScope](https://evalscope.readthedocs.io/) 的 `evalscope perf`
@@ -172,6 +172,8 @@ long 模式为**单轮**请求：`--number` 即请求数（不再按会话数 ×
   输入占绝大部分，该值远大于输出吞吐，两者不可混看）；
   `requests_per_second`：吞吐（含失败请求）；
 - `total_duration_s`：最早请求开始 → 最晚请求结束（并发场景下不等于墙钟耗时）；
+- 接口一律返回**秒**（便于与 evalscope 原始字段对齐），页面展示时 TTFT / TPOT 统一换算成
+  **毫秒（ms）**，端到端仍用秒；
 - 分位数（均值同 evalscope 一样按全部成功请求计数）用**最近秩法** `ceil(n·p) − 1` 取值，
   与 evalscope 写进 `benchmark.log` 的分位表逐值一致；
 - TTFT 只有 evalscope 解析到流的**非空增量文本**时才会记录，未记到时库里是 0。此时页面
@@ -193,7 +195,11 @@ long 模式为**单轮**请求：`--number` 即请求数（不再按会话数 ×
   `--db-commit-interval 1` 逐行提交，后端据此边跑边读，实时刷新进度、曲线与明细；
 - `meta.json`：任务快照（状态、实时指标、汇总、日志），key 已脱敏；
 - `proc.json`：运行期间记录 evalscope 进程组号与所属服务进程号（权限 600），收尾时删除；
-- `results.csv`：在页面点击「下载 CSV / 结果表格」时按需导出（UTF-8 BOM）。
+- `results.csv`：在页面点击「下载 CSV / 结果表格」时按需导出（UTF-8 BOM）；
+- `perf/benchmark.log`、`perf/performance_summary.txt`、`perf/perf_report.html`：evalscope
+  原生报告，详情页「原始产物」卡片可在线查看（日志/汇总为文本，报告以 iframe 内嵌渲染）
+  或下载完整原文；接口为 `GET /api/stress/runs/{run_id}/files`（清单）与
+  `.../file?path=<相对路径>[&download=1]`（正文），只放行上述三个文件名的白名单路径。
 
 提交任务后、启动 evalscope 之前，后端会先对目标端点做一次 TCP 连通性预检（3 秒超时，
 只握手不发请求、不消耗 token）：连接被拒 / 超时 / 域名解析失败会直接以 400 返回原因，

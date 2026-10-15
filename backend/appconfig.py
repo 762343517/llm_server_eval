@@ -17,7 +17,7 @@ DEFAULT_API_KEY = consts.DEFAULT_API_KEY
 DEFAULT_STRESS_ENDPOINT = os.environ.get("STRESS_ENDPOINT") or consts.DEFAULT_STRESS_ENDPOINT
 DEFAULT_STRESS_API_KEY = consts.DEFAULT_STRESS_API_KEY
 
-APP_TITLE = "SimpleQA-Verified 评测平台"
+APP_TITLE = "大模型服务测试平台"
 
 # 思考开关的三态取值（"" 表示不传该字段，由服务端默认决定）
 THINKING_LABELS = {"": "服务端默认（不传该字段）", "enabled": "开启思考",

@@ -3,7 +3,7 @@ import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { RouterLink, useRoute, useRouter } from 'vue-router'
 import { api } from '../api'
 import { KvList, LogPanel, MiniChart, ProgressBar, StatTile, StatusBadge } from '../components/index.js'
-import { compact, duration, int, isRunning, num, pct, shortFixed } from '../format'
+import { compact, duration, int, isRunning, ms, num, pct, shortFixed } from '../format'
 
 const route = useRoute()
 const router = useRouter()
@@ -18,6 +18,8 @@ const busy = ref(false)
 const filters = ref({ limit: 200, onlyErrors: false })
 const args = ref(null)
 const showArgs = ref(false)
+const files = ref([])
+const preview = ref(null)
 
 let timer = null
 let tick = 0
@@ -119,15 +121,71 @@ const cfgRows = computed(() => {
 })
 
 // evalscope 只在解析到流的**非空增量文本**后才记 TTFT，未记到时落库为 0。
-// 直接显示 0.000 会被读成"首字瞬时返回"，这里如实标为无数据（聚合值口径不变，
+// 直接显示 0 ms 会被读成"首字瞬时返回"，这里如实标为无数据（聚合值口径不变，
 // 与 benchmark.log 的 Avg TTFT 一致）。
-const ttftText = (row) => (Number(row.ttft_s) > 0 ? shortFixed(row.ttft_s, 3) : '—')
+const ttftText = (row) => (Number(row.ttft_s) > 0 ? ms(row.ttft_s) : '—')
+
+// 曲线与表内口径保持一致：接口给的是秒，绘图前换算成毫秒
+const chartPoints = computed(() =>
+  seriesPoints.value.map((p) => ({ ...p, ttft_ms: (Number(p.ttft_mean_s) || 0) * 1000 })),
+)
 
 const chartSeries = [
   { key: 'rps', label: 'RPS', color: '#2563eb', digits: 2 },
-  { key: 'ttft_mean_s', label: '首字延迟(s)', color: '#d97706', digits: 3 },
+  { key: 'ttft_ms', label: '首字延迟(ms)', color: '#d97706', digits: 1 },
   { key: 'e2e_mean_s', label: '端到端(s)', color: '#16a34a', digits: 2 },
 ]
+
+// ------------------------------------------------------------ 原始产物
+const fileSize = (value) => {
+  const n = Number(value) || 0
+  if (n < 1024) return `${n} B`
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`
+  return `${(n / 1024 / 1024).toFixed(2)} MB`
+}
+
+const fileTime = (value) => {
+  const n = Number(value)
+  if (!n) return '—'
+  return new Date(n * 1000).toLocaleString('zh-CN', { hour12: false })
+}
+
+const fileUrl = (file, download = false) =>
+  api.stressFileUrl(runId, file.path, { download })
+
+const filesError = ref('')
+const loadFiles = async () => {
+  try {
+    const data = await api.stressFiles(runId)
+    files.value = data.files || []
+    filesError.value = ''
+  } catch (e) {
+    filesError.value = e.message        // 接口异常也不能影响页面其余部分
+  }
+}
+
+const PREVIEW_LIMIT = 400000
+
+const openFile = async (file) => {
+  preview.value = { ...file, text: '', loading: file.kind !== 'html', url: fileUrl(file) }
+  if (file.kind === 'html') return
+  try {
+    const res = await fetch(fileUrl(file))
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    const text = await res.text()
+    preview.value = {
+      ...preview.value,
+      loading: false,
+      text:
+        text.length > PREVIEW_LIMIT
+          ? `${text.slice(0, PREVIEW_LIMIT)}\n\n…（文件较大，已截断显示，完整内容请下载）`
+          : text,
+    }
+  } catch (e) {
+    preview.value = null
+    error.value = `读取 ${file.name} 失败：${e.message}`
+  }
+}
 
 const loadRecords = async () => {
   try {
@@ -195,13 +253,16 @@ const deleteRun = async () => {
 
 onMounted(async () => {
   await loadSnap()
-  await Promise.all([loadRecords(), loadSeries()])
+  await Promise.all([loadRecords(), loadSeries(), loadFiles()])
   timer = setInterval(async () => {
     tick += 1
     if (!running.value) return
     await loadSnap()
     if (tick % 3 === 0) await loadSeries()
-    if (tick % 5 === 0) await loadRecords()
+    if (tick % 5 === 0) {
+      await loadRecords()
+      await loadFiles()          // 跑完后 evalscope 才写出报告，运行中一并刷新
+    }
   }, 2000)
 })
 onUnmounted(() => timer && clearInterval(timer))
@@ -264,11 +325,11 @@ onUnmounted(() => timer && clearInterval(timer))
         :tone="metrics.success_rate >= 0.99 ? 'good' : metrics.error_count ? 'bad' : ''"
       />
       <StatTile label="总请求" :value="int(metrics.total_requests)" :sub="`失败 ${int(metrics.error_count)}`" />
-      <StatTile label="首字延迟 均值" :value="shortFixed(metrics.ttft_mean_s, 3)" sub="s" />
-      <StatTile label="首字延迟 P95" :value="shortFixed(metrics.ttft_p95_s, 3)" sub="s" />
+      <StatTile label="首字延迟 均值" :value="ms(metrics.ttft_mean_s)" sub="ms" />
+      <StatTile label="首字延迟 P95" :value="ms(metrics.ttft_p95_s)" sub="ms" />
       <StatTile label="端到端 均值" :value="shortFixed(metrics.e2e_mean_s, 2)" sub="s" />
       <StatTile label="端到端 P95" :value="shortFixed(metrics.e2e_p95_s, 2)" sub="s" />
-      <StatTile label="TPOT 均值" :value="shortFixed(metrics.tpot_mean_s, 4)" sub="s/token" />
+      <StatTile label="TPOT 均值" :value="ms(metrics.tpot_mean_s)" sub="ms/token" />
       <StatTile label="单请求输出" :value="num(metrics.tokens_per_second_mean, 1)" sub="tokens/s" />
       <StatTile
         label="输出吞吐"
@@ -298,7 +359,7 @@ onUnmounted(() => timer && clearInterval(timer))
   <section class="card">
     <h2>实时曲线</h2>
     <p class="hint">按时间分桶（每桶最多 60 个点）{{ running ? ' · 运行中每 6 秒刷新' : '' }}</p>
-    <MiniChart :points="seriesPoints" :series="chartSeries" />
+    <MiniChart :points="chartPoints" :series="chartSeries" />
   </section>
 
   <section v-if="isRamp" class="card">
@@ -311,8 +372,8 @@ onUnmounted(() => timer && clearInterval(timer))
             <th class="num">请求数</th>
             <th class="num">成功率</th>
             <th class="num">RPS</th>
-            <th class="num">TTFT 均值</th>
-            <th class="num">TTFT P95</th>
+            <th class="num">TTFT 均值(ms)</th>
+            <th class="num">TTFT P95(ms)</th>
             <th class="num">端到端 均值</th>
             <th class="num">端到端 P95</th>
             <th class="num">单请求 tokens/s</th>
@@ -325,8 +386,8 @@ onUnmounted(() => timer && clearInterval(timer))
             <td class="num">{{ int(row.total_requests) }}</td>
             <td class="num">{{ pct(row.success_rate) }}</td>
             <td class="num">{{ num(row.requests_per_second, 2) }}</td>
-            <td class="num">{{ shortFixed(row.ttft_mean_s, 3) }}</td>
-            <td class="num">{{ shortFixed(row.ttft_p95_s, 3) }}</td>
+            <td class="num">{{ ms(row.ttft_mean_s) }}</td>
+            <td class="num">{{ ms(row.ttft_p95_s) }}</td>
             <td class="num">{{ shortFixed(row.e2e_mean_s, 2) }}</td>
             <td class="num">{{ shortFixed(row.e2e_p95_s, 2) }}</td>
             <td class="num">{{ num(row.tokens_per_second_mean, 1) }}</td>
@@ -362,14 +423,14 @@ onUnmounted(() => timer && clearInterval(timer))
         <thead>
           <tr>
             <th class="num">轮次</th>
-            <th class="num">TTFT 均值(s)</th>
+            <th class="num">TTFT 均值(ms)</th>
             <th class="num">端到端 均值(s)</th>
           </tr>
         </thead>
         <tbody>
           <tr v-for="(ttft, i) in conv.ttft_by_turn" :key="i">
             <td class="num">{{ i + 1 }}</td>
-            <td class="num">{{ shortFixed(ttft, 3) }}</td>
+            <td class="num">{{ ms(ttft) }}</td>
             <td class="num">{{ shortFixed(conv.e2e_by_turn[i], 2) }}</td>
           </tr>
         </tbody>
@@ -407,8 +468,8 @@ onUnmounted(() => timer && clearInterval(timer))
             <th class="num">用户</th>
             <th class="num">轮次</th>
             <th class="center">结果</th>
-            <th class="num">TTFT s</th>
-            <th class="num">TPOT s</th>
+            <th class="num">TTFT ms</th>
+            <th class="num">TPOT ms</th>
             <th class="num">端到端 s</th>
             <th class="num">prompt</th>
             <th class="num">输出</th>
@@ -428,7 +489,7 @@ onUnmounted(() => timer && clearInterval(timer))
               </span>
             </td>
             <td class="num">{{ ttftText(row) }}</td>
-            <td class="num">{{ shortFixed(row.tpot_s, 4) }}</td>
+            <td class="num">{{ ms(row.tpot_s) }}</td>
             <td class="num">{{ shortFixed(row.e2e_latency_s, 2) }}</td>
             <td class="num">{{ int(row.prompt_tokens) }}</td>
             <td class="num">{{ int(row.completion_tokens) }}</td>
@@ -451,6 +512,59 @@ onUnmounted(() => timer && clearInterval(timer))
       <summary>args.json</summary>
       <pre>{{ args || '加载中…' }}</pre>
     </details>
+  </section>
+
+  <section class="card">
+    <h2>原始产物</h2>
+    <p class="hint">
+      evalscope 直接生成的报告文件，可在线查看或下载完整原文；可视化报告为交互式 HTML，
+      图表脚本取自 CDN，离线环境图表不显示，下载到本地打开即可
+    </p>
+    <div v-if="filesError" class="empty">读取原始产物清单失败：{{ filesError }}</div>
+    <div v-else-if="!files.length" class="empty">
+      暂无可用的原始产物（任务未跑完或文件已清理）
+    </div>
+    <div v-else class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>文件名</th>
+            <th>说明</th>
+            <th class="num">大小</th>
+            <th class="num">修改时间</th>
+            <th class="center">操作</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr v-for="file in files" :key="file.path">
+            <td class="mono nowrap">{{ file.name }}</td>
+            <td>{{ file.label }}</td>
+            <td class="num nowrap">{{ fileSize(file.size) }}</td>
+            <td class="num nowrap">{{ fileTime(file.mtime) }}</td>
+            <td class="center nowrap">
+              <button class="btn sm" @click="openFile(file)">查看</button>
+              <a class="btn sm" :href="fileUrl(file, true)">下载</a>
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div v-if="preview" class="file-preview mt">
+      <div class="preview-head">
+        <span class="mono">{{ preview.name }}</span>
+        <span class="muted">{{ preview.label }}</span>
+        <span class="preview-actions">
+          <a class="btn sm" :href="fileUrl(preview, true)">下载</a>
+          <button class="btn sm" @click="preview = null">关闭</button>
+        </span>
+      </div>
+      <div v-if="preview.kind === 'html'" class="preview-frame">
+        <iframe :src="preview.url" title="perf_report.html"></iframe>
+      </div>
+      <pre v-else-if="preview.loading">加载中…</pre>
+      <pre v-else>{{ preview.text }}</pre>
+    </div>
   </section>
 
   <section class="card">

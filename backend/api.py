@@ -3,7 +3,8 @@
 路由约定：
   /api/meta                 应用元信息（表单默认值、选项、evalscope 状态）
   /api/accuracy/*           精度测试：任务列表 / 启动 / 详情 / 逐题 / 停止 / 删除 / CSV
-  /api/stress/*             压力测试：任务列表 / 启动 / 详情 / 明细 / 停止 / 删除 / CSV
+  /api/stress/*             压力测试：任务列表 / 启动 / 详情 / 明细 / 停止 / 删除 / CSV /
+                            原始产物（benchmark.log、performance_summary.txt、perf_report.html）
   /api/csv                  工作区内 CSV 文件预览
 其余路径交给 SPA（产物在 backend/webui/），未命中的静态文件回落到 index.html。
 """
@@ -429,6 +430,37 @@ def stress_args(run_id: str):
         raise HTTPException(404, "运行参数不存在")
     return JSONResponse({"text": snap["args_text"],
                          "path": stress.args_path(run_id) or ""})
+
+
+@app.get("/api/stress/runs/{run_id}/files")
+def stress_files(run_id: str):
+    """列出该任务可在线查看/下载的 evalscope 原始产物。"""
+    if not stress.get(run_id):
+        raise HTTPException(404, "任务不存在")
+    return JSONResponse({"run_id": run_id,
+                         "files": perf_core.list_result_files(stress.run_dir(run_id))})
+
+
+@app.api_route("/api/stress/runs/{run_id}/file", methods=["GET", "HEAD"])
+def stress_file(run_id: str, path: str = "", download: bool = False):
+    """查看（默认内联，日志走文本、报告走 text/html）或下载原始产物。
+
+    路径只接受 perf_core 白名单内的相对路径，避免任意文件读取。
+    """
+    if not stress.get(run_id):
+        raise HTTPException(404, "任务不存在")
+    try:
+        real = perf_core.result_file(stress.run_dir(run_id), path)
+    except ValueError as exc:
+        raise HTTPException(404, str(exc))
+    name = os.path.basename(real)
+    media_type = ("text/html; charset=utf-8" if name.endswith(".html")
+                  else "text/plain; charset=utf-8")
+    if download:
+        return FileResponse(real, media_type=media_type,
+                            filename="{}_{}".format(run_id, name))
+    return FileResponse(real, media_type=media_type,
+                        headers={"Content-Disposition": 'inline; filename="{}"'.format(name)})
 
 
 @app.post("/api/stress/runs/{run_id}/stop")

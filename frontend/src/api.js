@@ -60,6 +60,10 @@ export const api = {
   stressSeries: (id, buckets = 60) =>
     request(`/api/stress/runs/${encodeURIComponent(id)}/series${query({ buckets })}`),
   stressArgs: (id) => request(`/api/stress/runs/${encodeURIComponent(id)}/args`),
+  stressFiles: (id) => request(`/api/stress/runs/${encodeURIComponent(id)}/files`),
+  // 原始产物的直链（日志/汇总报告内联预览，报告 HTML 供 iframe 嵌入）
+  stressFileUrl: (id, path, { download = false } = {}) =>
+    `/api/stress/runs/${encodeURIComponent(id)}/file${query({ path, download: download ? 1 : '' })}`,
   stressStop: (id) => post(`/api/stress/runs/${encodeURIComponent(id)}/stop`),
   stressDelete: (id) =>
     request(`/api/stress/runs/${encodeURIComponent(id)}`, { method: 'DELETE' }),
