@@ -331,8 +331,10 @@ def _stress_cfg(payload):
         "turns": max(1, _capped(payload.get("turns"), "turns", "对话轮数")),
         "unique_prefix": bool(payload.get("unique_prefix")),
         "concurrency_mode": mode,
-        "concurrent_users": max(1, _capped(payload.get("concurrent_users"),
-                                           "concurrent_users", "并发用户数")),
+        # 阶梯模式下固定并发的输入框不参与本次压测，快照回填最大档位，
+        # 避免残留的默认值（如 8）在结果页被误读成本次生效的并发
+        "concurrent_users": max(levels) if mode == "ramp" else max(
+            1, _capped(payload.get("concurrent_users"), "concurrent_users", "并发用户数")),
         "iterations": max(1, _capped(payload.get("iterations"), "iterations", "迭代次数")),
         "ramp_levels": levels,
         "ramp_pause_seconds": max(0.0, min(

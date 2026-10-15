@@ -29,6 +29,12 @@ const levels = computed(() =>
 const isLong = computed(() => form.prompt_mode === 'long')
 const hasCustomPrefix = computed(() => Boolean(String(form.prefix_content || '').trim()))
 
+// 阶梯加压时该值是每一档的请求/会话数，固定并发时是单个并发下的数量
+const iterationsLabel = computed(() => {
+  const unit = isLong.value ? '请求数' : '会话数'
+  return form.concurrency_mode === 'ramp' ? `每档并发${unit}` : `每个并发${unit}`
+})
+
 // 与后端 perf_core.parse_tokens 同口径：支持 128000 / 128K / 1M（K=1000、M=1000000）
 const parseTokens = (value) => {
   if (value === null || value === undefined || value === '') return 0
@@ -62,6 +68,13 @@ const applyPreset = (totalTokens, ratio) => {
 }
 
 const isLongCfg = (cfg) => Boolean(cfg && cfg.prompt_mode === 'long')
+
+// 加压方式以快照的 concurrency_mode 为准：两种方式下另一组的字段都是表单残留值
+const isRampCfg = (cfg) => {
+  if (!cfg) return false
+  if (cfg.concurrency_mode) return cfg.concurrency_mode === 'ramp'
+  return Array.isArray(cfg.ramp_levels) && cfg.ramp_levels.length > 0
+}
 
 const expected = computed(() => {
   const users =
@@ -296,10 +309,18 @@ onUnmounted(() => timer && clearInterval(timer))
             v-model="form.prefix_content"
             placeholder="留空：由 evalscope 生成所有请求共享的随机前缀，长度精确可控；填写：按该内容注入固定前缀，长度自动 = 序列长度 − 提问长度"
           ></textarea>
+          <span class="tip">
+            留空时走 random 数据集：请求内容由分词器随机 token 生成，不含业务语义，
+            因此不需要填提问内容；填写后走 line_by_line，提问内容作为每条请求的后缀
+          </span>
         </div>
-        <div class="field">
+        <div v-if="hasCustomPrefix" class="field">
           <label>提问内容</label>
-          <textarea v-model="form.prompt" placeholder="固定前缀内容模式下作为每条请求的可变后缀"></textarea>
+          <textarea
+            v-model="form.prompt"
+            placeholder="作为每条请求的可变后缀；留空则使用默认提问"
+          ></textarea>
+          <span class="tip">各请求的前缀一致，后缀为这条提问（多条请求会带上序号）</span>
         </div>
       </div>
     </template>
@@ -349,7 +370,7 @@ onUnmounted(() => timer && clearInterval(timer))
         </div>
       </template>
       <div class="field">
-        <label>{{ isLong ? '每个并发请求数' : '每个并发会话数' }}</label>
+        <label>{{ iterationsLabel }}</label>
         <input v-model.number="form.iterations" type="number" min="1" max="10000" />
       </div>
     </div>
@@ -423,8 +444,8 @@ onUnmounted(() => timer && clearInterval(timer))
               <div class="muted mono">{{ (run.cfg && run.cfg.endpoint) || '—' }}</div>
             </td>
             <td class="nowrap">
-              <template v-if="run.cfg && run.cfg.ramp_levels && run.cfg.ramp_levels.length">
-                阶梯 {{ run.cfg.ramp_levels.join('/') }}
+              <template v-if="isRampCfg(run.cfg)">
+                阶梯 {{ (run.cfg.ramp_levels || []).join('/') || '—' }}
               </template>
               <template v-else>并发 {{ (run.cfg && run.cfg.concurrent_users) || '—' }}</template>
               <div v-if="isLongCfg(run.cfg)" class="muted">

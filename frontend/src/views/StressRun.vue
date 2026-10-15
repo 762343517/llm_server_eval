@@ -33,6 +33,10 @@ const cfgRows = computed(() => {
   const c = cfg.value
   const text = (v) => (v === null || v === undefined || v === '' ? '—' : String(v))
   const isLong = c.prompt_mode === 'long'
+  // 兼容早期快照：没有 concurrency_mode 时按 ramp_levels 是否为空判断
+  const isRampCfg = c.concurrency_mode
+    ? c.concurrency_mode === 'ramp'
+    : Array.isArray(c.ramp_levels) && c.ramp_levels.length > 0
   const rows = [
     { k: '任务名称', v: text(c.name) },
     { k: '说明', v: text(c.description) },
@@ -65,7 +69,13 @@ const cfgRows = computed(() => {
       },
       { k: '预热请求数', v: text(c.warmup_num) },
       { k: '强制输出长度', v: c.ignore_eos ? '是（ignore_eos）' : '否' },
-      { k: '提问内容', v: text(c.prompt) },
+      // random 数据集按 token 随机生成请求内容，提问内容只在固定前缀内容模式下生效
+      {
+        k: '提问内容',
+        v: custom
+          ? (String(c.prompt || '').trim() || '未填写（使用默认提问）')
+          : '不适用（random 数据集按 token 随机生成）',
+      },
     )
   } else {
     rows.push(
@@ -81,20 +91,30 @@ const cfgRows = computed(() => {
     { k: 'top_p', v: text(c.top_p) },
     { k: 'top_k', v: c.top_k === -1 ? '-1（不发送）' : text(c.top_k) },
     { k: '请求超时', v: c.timeout === null || c.timeout === undefined ? '—' : `${c.timeout}s` },
-    { k: '加压方式', v: c.concurrency_mode === 'ramp' ? '阶梯加压' : '固定并发' },
-    { k: '并发用户数', v: text(c.concurrent_users) },
-    { k: isLong ? '每个并发请求数' : '每个并发会话数', v: text(c.iterations) },
-    {
-      k: '并发档位',
-      v: Array.isArray(c.ramp_levels) && c.ramp_levels.length ? c.ramp_levels.join(' / ') : '—',
-    },
-    {
-      k: '档位间隔',
-      v: c.ramp_pause_seconds === null || c.ramp_pause_seconds === undefined
-        ? '—'
-        : `${c.ramp_pause_seconds}s`,
-    },
+    { k: '加压方式', v: isRampCfg ? '阶梯加压' : '固定并发' },
   )
+  // 两种加压方式的生效字段不同：concurrent_users 在阶梯模式下是表单残留值，
+  // ramp_levels 在固定并发下同理，因此各自只展示本轮真正生效的那组。
+  if (isRampCfg) {
+    rows.push(
+      {
+        k: '并发档位',
+        v: Array.isArray(c.ramp_levels) && c.ramp_levels.length ? c.ramp_levels.join(' / ') : '—',
+      },
+      {
+        k: '档位间隔',
+        v: c.ramp_pause_seconds === null || c.ramp_pause_seconds === undefined
+          ? '—'
+          : `${c.ramp_pause_seconds}s`,
+      },
+      { k: isLong ? '每档并发请求数' : '每档并发会话数', v: text(c.iterations) },
+    )
+  } else {
+    rows.push(
+      { k: '并发用户数', v: text(c.concurrent_users) },
+      { k: isLong ? '每个并发请求数' : '每个并发会话数', v: text(c.iterations) },
+    )
+  }
   return rows
 })
 
