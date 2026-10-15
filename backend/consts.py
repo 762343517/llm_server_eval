@@ -49,10 +49,10 @@ DEFAULT_STRESS_PROMPT = "请用一句话介绍你自己。"
 DEFAULT_STRESS_TURNS = 1
 DEFAULT_STRESS_CONCURRENCY_MODE = "fixed"
 DEFAULT_STRESS_CONCURRENT_USERS = 8
-# 请求数口径与 evalscope 一致：固定并发 = 单个 --number，阶梯 = 与档位一一对应的 --number 列表
-DEFAULT_STRESS_NUMBERS = 24
+# 负载口径：表单只填「每个并发的请求数」，服务端换算成 evalscope 的 --number
+# （= 并发数 × 每个并发的请求数）；固定并发只有一档，阶梯模式按各档并发分别换算
+DEFAULT_STRESS_ITERATIONS = 3
 DEFAULT_STRESS_RAMP_LEVELS_TEXT = "2, 4, 8, 16"
-DEFAULT_STRESS_RAMP_NUMBERS_TEXT = "6, 12, 24, 48"
 DEFAULT_STRESS_RAMP_PAUSE_SECONDS = 10
 
 # 请求模式：chat = 自定义会话提问；long = 长序列 + 固定前缀（Prefix Cache 命中率）

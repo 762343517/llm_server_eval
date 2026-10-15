@@ -250,9 +250,9 @@ def levels(cfg):
 def numbers(cfg):
     """evalscope `--number` 列表，与 levels(cfg) 同序一一对应。
 
-    口径与 evalscope 一致：`--number` 为本档要发出的请求总数（chat 多轮模式下为会话数），
-    `--parallel` 为并发数，两者不做换算。早期快照缺少 numbers 时回退到旧口径
-    （--number = 并发数 × 每个并发的请求数），保证历史任务仍可复现。
+    `--number` 为本档要发出的请求总数（chat 多轮模式下为会话数），由后端按
+    「并发数 × 每个并发的请求数（cfg.iterations）」换算后写入快照；快照缺少
+    numbers（早期任务）时按同一公式现算，保证历史任务仍可复现。
     """
     users = levels(cfg)
     raw = cfg.get("numbers") or []

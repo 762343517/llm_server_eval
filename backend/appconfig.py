@@ -88,6 +88,28 @@ def accuracy_defaults():
     return d
 
 
+def _legacy_iterations(saved):
+    """旧版表单直接填逐档 --number（请求总数），换算回「每个并发的请求数」用于回填。
+
+    返回 None 表示无从换算（快照里没有请求数信息），此时沿用静态默认值。
+    """
+    try:
+        levels = parse_levels(saved.get("ramp_levels_text"))
+        counts = parse_int_list(saved.get("ramp_numbers_text"))
+    except ValueError:
+        levels, counts = [], []
+    if levels and counts:
+        return max(1, counts[0] // levels[0])
+    try:
+        total = int(saved.get("numbers") or 0)
+        users = int(saved.get("concurrent_users") or 0)
+    except (TypeError, ValueError):
+        return None
+    if total > 0 and users > 0:
+        return max(1, total // users)
+    return None
+
+
 def stress_defaults():
     """压力测试表单默认值：静态默认 + 上次提交的配置。"""
     d = {
@@ -107,9 +129,9 @@ def stress_defaults():
         "unique_prefix": False,
         "concurrency_mode": consts.DEFAULT_STRESS_CONCURRENCY_MODE,
         "concurrent_users": consts.DEFAULT_STRESS_CONCURRENT_USERS,
-        "numbers": consts.DEFAULT_STRESS_NUMBERS,
+        # 表单只填「每个并发的请求数」，最终 --number 由后端按并发数换算
+        "iterations": consts.DEFAULT_STRESS_ITERATIONS,
         "ramp_levels_text": consts.DEFAULT_STRESS_RAMP_LEVELS_TEXT,
-        "ramp_numbers_text": consts.DEFAULT_STRESS_RAMP_NUMBERS_TEXT,
         "ramp_pause_seconds": consts.DEFAULT_STRESS_RAMP_PAUSE_SECONDS,
         "prompt_mode": consts.DEFAULT_STRESS_PROMPT_MODE,
         "tokenizer_path": consts.DEFAULT_STRESS_TOKENIZER_PATH,
@@ -122,6 +144,10 @@ def stress_defaults():
         "ignore_eos": consts.DEFAULT_STRESS_IGNORE_EOS,
     }
     saved = load_last_cfg(LAST_STRESS_CFG_NAME)
+    if saved and "iterations" not in saved:
+        legacy = _legacy_iterations(saved)
+        if legacy:
+            d["iterations"] = legacy
     for k, v in saved.items():
         if k in d and v is not None:
             d[k] = v

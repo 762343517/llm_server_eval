@@ -24,13 +24,10 @@ const splitInts = (text) =>
     .map((s) => parseInt(s.trim(), 10))
     .filter((n) => Number.isFinite(n) && n > 0)
 
-const trimNum = (v) =>
-  Number.isInteger(v) ? String(v) : v.toFixed(2).replace(/0+$/, '').replace(/\.$/, '')
-
 // evalscope 口径：--parallel 是并发数（同时发起的请求数）
 const levels = computed(() => splitInts(form.ramp_levels_text))
-// --number 是本档要发出的请求总数；chat 多轮模式下该值是会话数
-const numbers = computed(() => splitInts(form.ramp_numbers_text))
+// 表单只填「每个并发的请求数」，服务端换算 --number = 并发数 × 该值
+const iterations = computed(() => Math.max(0, parseInt(form.iterations, 10) || 0))
 
 // 长序列模式：序列长度 / 固定前缀 / 变长后缀 / Prefix Cache 命中率
 const isLong = computed(() => form.prompt_mode === 'long')
@@ -40,45 +37,33 @@ const hasCustomPrefix = computed(() => Boolean(String(form.prefix_content || '')
 const countUnit = computed(() => (isLong.value ? '请求数' : '会话数'))
 const countTip = computed(() =>
   isLong.value
-    ? '本次压测发出的请求总数（evalscope --number）'
-    : `本次压测发起的会话总数；每会话串行 ${Number(form.turns) || 1} 轮请求，实际请求数 = 会话数 × 轮数`,
+    ? '本档请求总数 = 并发数 × 该值（服务端换算成 evalscope 的 --number）'
+    : `本档会话总数 = 并发数 × 该值；每会话串行 ${Number(form.turns) || 1} 轮请求，实际请求数 = 会话数 × 轮数`,
 )
 
-// 阶梯模式：--parallel 与 --number 一一对应（升序去重配对，与后端 _ramp_pairs 同口径）
+// 阶梯模式：每档 --number = 该档并发 × 每个并发的请求数（升序去重，与后端 _ramp_pairs 同口径）
 const rampPairs = computed(() => {
   const users = levels.value
-  let counts = numbers.value
-  if (!users.length || !counts.length) return []
-  if (counts.length === 1) counts = users.map(() => counts[0])
-  if (counts.length !== users.length) return []
+  if (!users.length || !iterations.value) return []
   const pairs = new Map()
-  users.forEach((u, i) => {
-    if (!pairs.has(u)) pairs.set(u, counts[i])
+  users.forEach((u) => {
+    if (!pairs.has(u)) pairs.set(u, u * iterations.value)
   })
   return [...pairs.entries()].sort((a, b) => a[0] - b[0])
 })
 
-// 请求数个数既不是 1 也不等于档位数时无法一一对应（后端同样会拒绝）
-const rampMismatch = computed(
-  () =>
-    form.concurrency_mode === 'ramp' &&
-    levels.value.length > 0 &&
-    numbers.value.length > 1 &&
-    numbers.value.length !== levels.value.length,
+// 固定并发：--number = 并发数 × 每个并发的请求数
+const fixedNumber = computed(
+  () => (Number(form.concurrent_users) || 0) * iterations.value,
 )
 
-// 派生展示：一个并发串行发出的请求数 = --number ÷ --parallel
-const perParallel = computed(() => {
+// 各档 --number 概览：表单不再逐档手填，统一由服务端换算
+const numbersText = computed(() => {
   if (form.concurrency_mode === 'ramp') {
-    if (!rampPairs.value.length) return '—'
-    const vals = rampPairs.value.map(([u, n]) => n / u)
-    const low = Math.min(...vals)
-    const high = Math.max(...vals)
-    return low === high ? trimNum(low) : `${trimNum(low)} ~ ${trimNum(high)}`
+    const vals = rampPairs.value.map(([, n]) => n)
+    return vals.length ? vals.join(' / ') : '—'
   }
-  const users = Number(form.concurrent_users) || 0
-  const count = Number(form.numbers) || 0
-  return users && count ? trimNum(count / users) : '—'
+  return fixedNumber.value ? String(fixedNumber.value) : '—'
 })
 
 // 与后端 perf_core.parse_tokens 同口径：支持 128000 / 128K / 1M（K=1000、M=1000000）
@@ -138,7 +123,7 @@ const expected = computed(() => {
   const counts =
     form.concurrency_mode === 'ramp'
       ? rampPairs.value.reduce((sum, [, n]) => sum + n, 0)
-      : Number(form.numbers) || 0
+      : fixedNumber.value
   const turns = isLong.value ? 1 : Number(form.turns) || 1
   return counts * turns
 })
@@ -418,9 +403,11 @@ onUnmounted(() => timer && clearInterval(timer))
           <span class="tip">同时发起的请求数</span>
         </div>
         <div class="field">
-          <label>{{ countUnit }}（--number）</label>
-          <input v-model.number="form.numbers" type="number" min="1" max="100000" />
-          <span class="tip">{{ countTip }}</span>
+          <label>每个并发的请求数</label>
+          <input v-model.number="form.iterations" type="number" min="1" max="10000" />
+          <span class="tip">
+            {{ countTip }}（本档 --number = {{ int(fixedNumber) }}）
+          </span>
         </div>
       </template>
       <template v-else>
@@ -430,14 +417,11 @@ onUnmounted(() => timer && clearInterval(timer))
           <span class="tip">每个档位同时发起的请求数</span>
         </div>
         <div class="field">
-          <label>各档{{ countUnit }}（--number，与档位一一对应）</label>
-          <input v-model.trim="form.ramp_numbers_text" type="text" placeholder="6, 12, 24, 48" />
-          <span class="tip" :class="{ warn: rampMismatch }">
-            {{
-              rampMismatch
-                ? `档位 ${levels.length} 个、请求数 ${numbers.length} 个，数量需一致（或只填一个值表示各档相同）`
-                : `本档要发出的${countUnit}；只填一个值表示各档相同`
-            }}
+          <label>每个并发的请求数</label>
+          <input v-model.number="form.iterations" type="number" min="1" max="10000" />
+          <span class="tip">
+            每档总{{ countUnit }} = 该档并发数 × 该值，由服务端换算为 evalscope 的
+            --number（当前 {{ numbersText }}）
           </span>
         </div>
         <div class="field">
@@ -456,14 +440,11 @@ onUnmounted(() => timer && clearInterval(timer))
           : form.concurrent_users"
       />
       <StatTile
-        v-if="form.concurrency_mode === 'ramp'"
         :label="`各档${countUnit}（--number）`"
-        :value="rampPairs.map(([, n]) => n).join(' / ') || '—'"
-      />
-      <StatTile
-        label="每个并发请求数"
-        :value="perParallel"
-        :sub="isLong ? '--number ÷ --parallel' : '会话数 ÷ 并发数'"
+        :value="numbersText"
+        :sub="form.concurrency_mode === 'ramp'
+          ? '各档并发数 × 每个并发的请求数'
+          : '并发数 × 每个并发的请求数'"
       />
       <template v-if="isLong">
         <StatTile label="序列长度" :value="compact(seqLength)" sub="tokens" />
