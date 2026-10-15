@@ -9,6 +9,7 @@ import os
 
 import consts
 import eval_core
+import perf_core
 import run_manager
 
 # 端点/密钥默认值统一维护在 consts.py；此处仅保留端点的环境变量覆盖能力
@@ -110,6 +111,14 @@ def _legacy_iterations(saved):
     return None
 
 
+def _valid_tokenizer(path):
+    """分词器路径必须落在固定的 model/ 目录内且真实存在，否则回落到当前可用默认值。"""
+    path = str(path or "").strip()
+    if path and perf_core.tokenizer_in_root(path) and os.path.isdir(path):
+        return path
+    return perf_core.default_tokenizer()
+
+
 def stress_defaults():
     """压力测试表单默认值：静态默认 + 上次提交的配置。"""
     d = {
@@ -134,7 +143,8 @@ def stress_defaults():
         "ramp_levels_text": consts.DEFAULT_STRESS_RAMP_LEVELS_TEXT,
         "ramp_pause_seconds": consts.DEFAULT_STRESS_RAMP_PAUSE_SECONDS,
         "prompt_mode": consts.DEFAULT_STRESS_PROMPT_MODE,
-        "tokenizer_path": consts.DEFAULT_STRESS_TOKENIZER_PATH,
+        # 分词器来自固定目录 model/，默认取其中第一个带对话模板的目录
+        "tokenizer_path": perf_core.default_tokenizer(),
         "seq_length": consts.DEFAULT_STRESS_SEQ_LENGTH,
         "output_length": consts.DEFAULT_STRESS_OUTPUT_LENGTH,
         "prefix_cache_ratio": consts.DEFAULT_STRESS_PREFIX_CACHE_RATIO,
@@ -151,6 +161,8 @@ def stress_defaults():
     for k, v in saved.items():
         if k in d and v is not None:
             d[k] = v
+    # 历史配置里的分词器可能已被移出 model/ 目录或删除，这里静默回落到可用值
+    d["tokenizer_path"] = _valid_tokenizer(d["tokenizer_path"])
     return d
 
 

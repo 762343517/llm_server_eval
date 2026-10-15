@@ -10,6 +10,12 @@
   last_config 覆盖。
 """
 
+import os
+
+# 分词器根目录：固定为项目仓库内的 model/ 目录，页面的分词器下拉框只从这里列候选
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+MODEL_DIR = os.path.join(PROJECT_ROOT, "model")
+
 # ---------------------------------------------------------------- 精度测试
 # 被测模型：完整的 chat/completions 地址
 DEFAULT_ENDPOINT = "http://10.174.0.70:34000/v1/chat/completions"
@@ -58,7 +64,8 @@ DEFAULT_STRESS_RAMP_PAUSE_SECONDS = 10
 # 请求模式：chat = 自定义会话提问；long = 长序列 + 固定前缀（Prefix Cache 命中率）
 DEFAULT_STRESS_PROMPT_MODE = "chat"
 # 长序列模式：分词器路径（evalscope 的 random 数据集按 token 精确生成，必需）
-DEFAULT_STRESS_TOKENIZER_PATH = "/home/wtc/prj/zhipuEval/model/GLM-5.3"
+# 固定取项目 model/ 目录下的分词器目录，页面下拉框的候选即来自该目录
+DEFAULT_STRESS_TOKENIZER_PATH = os.path.join(MODEL_DIR, "GLM-5.3")
 # 序列长度（输入 tokens；支持 "128000"、"128K"、"1M"，K=1000）
 DEFAULT_STRESS_SEQ_LENGTH = 128000
 # 输出长度（tokens；映射 --min-tokens/--max-tokens，保证 TPOT 口径一致）

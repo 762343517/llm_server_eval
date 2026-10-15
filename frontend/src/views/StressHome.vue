@@ -52,6 +52,21 @@ const levels = computed(() => splitInts(form.ramp_levels_text))
 // 表单只填「每个并发的请求数」，服务端换算 --number = 并发数 × 该值
 const iterations = computed(() => Math.max(0, parseInt(form.iterations, 10) || 0))
 
+// 分词器候选：后端固定扫描项目 model/ 目录；历史配置里的路径已不在候选中时单独列出，
+// 避免打开页面就被静默改写成别的分词器
+const tokenizerOptions = computed(() => {
+  const items = store.tokenizers.map((t) => ({
+    value: t.path,
+    label: t.has_chat_template ? t.name : `${t.name}（缺少对话模板）`,
+  }))
+  const current = String(form.tokenizer_path || '').trim()
+  if (current && !items.some((t) => t.value === current)) {
+    items.unshift({ value: current, label: `${current}（历史配置）` })
+  }
+  return items
+})
+const tokenizerDir = computed(() => store.tokenizerDir)
+
 // 长序列模式：序列长度 / 固定前缀 / 变长后缀 / Prefix Cache 命中率
 const isLong = computed(() => form.prompt_mode === 'long')
 const hasCustomPrefix = computed(() => Boolean(String(form.prefix_content || '').trim()))
@@ -356,15 +371,19 @@ onUnmounted(() => timer && clearInterval(timer))
       </div>
       <div class="grid mt">
         <div class="field span-2">
-          <label>分词器路径</label>
-          <input
-            v-model.trim="form.tokenizer_path"
-            type="text"
-            placeholder="/home/wtc/prj/zhipuEval/model/GLM-5.3"
-          />
+          <label>分词器</label>
+          <select v-model="form.tokenizer_path">
+            <option v-for="t in tokenizerOptions" :key="t.value" :value="t.value">
+              {{ t.label }}
+            </option>
+          </select>
           <span class="tip">
             evalscope 按 token 精确生成长序列，需与被测模型同一词表的分词器；
+            后端固定从项目 model/ 目录读取候选{{ tokenizerDir ? `（${tokenizerDir}）` : '' }}，
             目录须含对话模板（chat_template.jinja 或 tokenizer_config.json 的 chat_template）
+          </span>
+          <span v-if="!tokenizerOptions.length" class="tip">
+            model/ 目录下暂时没有可用分词器，请先把分词器目录放进该目录
           </span>
         </div>
         <div class="field">

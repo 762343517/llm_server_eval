@@ -130,6 +130,9 @@ def api_meta():
         "stress": {
             "defaults": appconfig.stress_defaults(),
             "evalscope": perf_core.probe(),
+            # 分词器目录固定为项目内的 model/，候选列表供页面下拉框选择
+            "tokenizer_dir": consts.MODEL_DIR,
+            "tokenizers": perf_core.list_tokenizers(),
             "saved_cfg_at": _mtime(os.path.join(run_manager.RUNS_DIR,
                                                 appconfig.LAST_STRESS_CFG_NAME)),
         },

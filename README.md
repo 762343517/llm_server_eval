@@ -147,7 +147,7 @@ evalscope 不自动补全请求路径：端点仅到端口时补 `/v1/chat/compl
 | Prefix Cache 命中率 | 固定前缀 / 序列长度，变长后缀 = 序列长度 − 固定前缀（与固定前缀长度择一填写，显式长度优先） |
 | 固定前缀内容 | 可选。留空由 evalscope 生成共享随机前缀（长度精确可控）；填写则以该正文补齐为固定前缀 |
 | 提问内容 | 仅在填写固定前缀内容时生效（每条请求的可变后缀）；留空时页面不显示该字段，`random` 数据集的请求内容由分词器随机 token 生成 |
-| 分词器路径 | 必需，需与被测模型同一词表（evalscope 按 token 精确生成长序列） |
+| 分词器 | 必需，页面下拉框选择；候选固定来自仓库内的 `model/` 目录（后端只接受该目录下的本地路径），需与被测模型同一词表（evalscope 按 token 精确生成长序列） |
 | 输出长度 | 映射 `--min-tokens` / `--max-tokens`，固定输出长度使 TPOT 口径一致 |
 | 预热请求数 | 先发若干请求将共享前缀写入缓存再统计（建议不小于并发数，0 = 关闭） |
 | 强制输出长度 | `--extra-args '{"ignore_eos": true}'`，忽略停止符按输出长度生成 |
@@ -157,6 +157,11 @@ token 数、`--min/max-prompt-length` 为变长后缀长度，各请求前缀一
 固定前缀内容 → `--dataset line_by_line` + `--dataset-args`（`prefix_file` 指向任务目录的
 `prefix.txt`、`target_input_len` 为序列长度、`input_len_mode=cap`，前缀补齐到「序列长度 −
 提问长度」，后缀取 `prompts.txt` 各行，即表单里那条提问，各请求内容相同）。
+
+分词器目录固定在仓库的 `model/` 下：页面下拉框由后端扫描该目录（含 `tokenizer.json` 或
+`tokenizer_config.json` 的子目录）生成，带对话模板的排在最前，默认选中第一个；提交时后端
+校验本地路径必须位于该目录内（`perf_core.validate_tokenizer`），放到别处会被拒绝并提示。
+新增分词器只需把整个模型目录拷进 `model/`，刷新页面即可在下拉框里看到。
 
 分词器要求（实测 GLM-5.3 满足）：
 

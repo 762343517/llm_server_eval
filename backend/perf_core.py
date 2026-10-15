@@ -39,6 +39,8 @@ import time
 from datetime import datetime, timedelta
 from urllib.parse import urlsplit
 
+import consts
+
 CLI_NAME = "evalscope"
 API_NAME = "openai"                       # 被测服务统一按 OpenAI 兼容协议访问
 DATASET_NAME = "custom_multi_turn"        # 自定义会话数据集（支持多轮）
@@ -370,6 +372,50 @@ def has_chat_template(path):
     return os.path.isfile(os.path.join(path, "chat_template.jinja"))
 
 
+def list_tokenizers():
+    """枚举 model/ 目录下可用作分词器的模型目录（含 tokenizer.json 或 tokenizer_config.json）。
+
+    分词器根目录固定为项目内的 model/（consts.MODEL_DIR）：页面下拉框的候选来自这里，
+    提交时也只接受该目录下的本地路径，避免分词器散落各处导致压测口径不一致。
+    """
+    items = []
+    try:
+        names = sorted(os.listdir(consts.MODEL_DIR))
+    except OSError:
+        return items
+    for name in names:
+        path = os.path.join(consts.MODEL_DIR, name)
+        if not os.path.isdir(path):
+            continue
+        if not any(os.path.isfile(os.path.join(path, f))
+                   for f in ("tokenizer.json", "tokenizer_config.json")):
+            continue
+        items.append({"name": name, "path": path,
+                      "has_chat_template": has_chat_template(path)})
+    # 带对话模板的排前面：长序列模式要求分词器能套模板估算 prompt token 数
+    items.sort(key=lambda it: (not it["has_chat_template"], it["name"]))
+    return items
+
+
+def default_tokenizer():
+    """默认分词器：model/ 下第一个带对话模板的目录，没有候选时退回常量默认值。"""
+    items = list_tokenizers()
+    for item in items:
+        if item["has_chat_template"]:
+            return item["path"]
+    return items[0]["path"] if items else consts.DEFAULT_STRESS_TOKENIZER_PATH
+
+
+def tokenizer_in_root(path):
+    """本地路径是否位于固定的分词器根目录 model/ 之内。"""
+    root = os.path.realpath(consts.MODEL_DIR)
+    real = os.path.realpath(path)
+    try:
+        return os.path.commonpath([root, real]) == root
+    except ValueError:                  # 不同盘符等极端情况
+        return False
+
+
 def validate_tokenizer(tokenizer):
     """提前校验分词器目录，避免 evalscope 子进程里抛出难以定位的 traceback。
 
@@ -380,6 +426,10 @@ def validate_tokenizer(tokenizer):
     """
     if not os.path.isabs(tokenizer):
         return
+    if not tokenizer_in_root(tokenizer):
+        raise ValueError(
+            "分词器只能使用项目 model/ 目录下的模型：{}（请把分词器放到该目录，"
+            "或在页面上从下拉框选择）".format(consts.MODEL_DIR))
     if not os.path.isdir(tokenizer):
         raise ValueError("分词器路径不存在：{}".format(tokenizer))
     if not has_chat_template(tokenizer):

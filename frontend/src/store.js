@@ -30,4 +30,11 @@ export const store = reactive({
   get evalscope() {
     return (this.meta && this.meta.stress && this.meta.stress.evalscope) || {}
   },
+  // 分词器候选：后端固定扫描项目 model/ 目录，页面只允许从这里选择
+  get tokenizers() {
+    return (this.meta && this.meta.stress && this.meta.stress.tokenizers) || []
+  },
+  get tokenizerDir() {
+    return (this.meta && this.meta.stress && this.meta.stress.tokenizer_dir) || ''
+  },
 })
