@@ -3,8 +3,9 @@
 路由约定：
   /api/meta                 应用元信息（表单默认值、选项、evalscope 状态）
   /api/accuracy/*           精度测试：任务列表 / 启动 / 详情 / 逐题 / 停止 / 删除 / CSV
-  /api/stress/*             压力测试：任务列表 / 启动 / 详情 / 明细 / 停止 / 删除 / CSV /
-                            原始产物（benchmark.log、performance_summary.txt、perf_report.html）
+  /api/stress/*             压力测试：任务列表 / 启动 / 保存配置 / 详情 / 明细 / 停止 /
+                            删除 / CSV / 原始产物（benchmark.log、performance_summary.txt、
+                            perf_report.html）
   /api/csv                  工作区内 CSV 文件预览
 其余路径交给 SPA（产物在 backend/webui/），未命中的静态文件回落到 index.html。
 """
@@ -120,6 +121,8 @@ def api_meta():
         "stress": {
             "defaults": appconfig.stress_defaults(),
             "evalscope": perf_core.probe(),
+            "saved_cfg_at": _mtime(os.path.join(run_manager.RUNS_DIR,
+                                                appconfig.LAST_STRESS_CFG_NAME)),
         },
         "csv": {"default_limit": csvview.CSV_DEFAULT_LIMIT,
                 "max_limit": csvview.CSV_MAX_LIMIT},
@@ -431,6 +434,26 @@ def stress_start(payload: dict):
         raise HTTPException(503, str(exc))
     _save_stress_last_cfg(cfg, payload)
     return JSONResponse({"run_id": run_id})
+
+
+@app.post("/api/stress/config")
+def stress_save_config(payload: dict):
+    """手动保存压测配置：只校验并落盘，不启动任务。
+
+    默认只在任务成功启动后才落盘（见 stress_start），因此「改了表单没启动」或
+    「启动失败（如参数非法、目标不可达）」时配置都会丢；这里提供显式保存入口。
+    校验口径与启动完全一致，避免把非法值存成下次打开页面的默认值。
+    """
+    payload = payload or {}
+    try:
+        cfg = _stress_cfg(payload)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    _save_stress_last_cfg(cfg, payload)
+    return JSONResponse({
+        "saved_at": _mtime(os.path.join(run_manager.RUNS_DIR,
+                                        appconfig.LAST_STRESS_CFG_NAME)),
+    })
 
 
 @app.get("/api/stress/runs/{run_id}")

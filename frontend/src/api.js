@@ -49,6 +49,7 @@ export const api = {
 
   stressRuns: () => request('/api/stress/runs'),
   stressStart: (cfg) => post('/api/stress/runs', cfg),
+  stressSaveConfig: (cfg) => post('/api/stress/config', cfg),
   stressRun: (id) => request(`/api/stress/runs/${encodeURIComponent(id)}`),
   stressRecords: (id, { limit = 200, onlyErrors = false } = {}) =>
     request(

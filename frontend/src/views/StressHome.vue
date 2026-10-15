@@ -10,11 +10,18 @@ const router = useRouter()
 const form = reactive({})
 const runs = ref([])
 const error = ref('')
+const notice = ref('')
 const submitting = ref(false)
+const saving = ref(false)
+const refreshing = ref(false)
 const busyId = ref('')
 let timer = null
 
 const evalscope = computed(() => store.evalscope)
+const savedAt = computed(() => {
+  const t = store.meta && store.meta.stress && store.meta.stress.saved_cfg_at
+  return t ? new Date(t * 1000).toLocaleString() : ''
+})
 const hasRunning = computed(() => runs.value.some((r) => isRunning(r.status)))
 
 const splitInts = (text) =>
@@ -142,8 +149,36 @@ const loadRuns = async () => {
   }
 }
 
+// force=true 时重新拉 /api/meta 并回填表单：默认值来自磁盘上的上次配置，
+// 只有强制刷新才能读到「刚提交/刚保存」的那份
+const loadAll = async (force = false) => {
+  refreshing.value = true
+  await store.load(force)
+  applyDefaults()
+  await loadRuns()
+  refreshing.value = false
+}
+
+// 手动保存：只校验并落盘，不启动任务（改了表单没启动 / 启动失败时不会丢配置）
+const saveConfig = async () => {
+  error.value = ''
+  notice.value = ''
+  saving.value = true
+  try {
+    await api.stressSaveConfig({ ...form })
+    // 只刷新 meta 取新的 saved_cfg_at，不再 applyDefaults，避免覆盖当前表单
+    await store.load(true)
+    notice.value = `配置已保存（${savedAt.value}），下次打开本页会沿用`
+  } catch (e) {
+    error.value = e.message
+  } finally {
+    saving.value = false
+  }
+}
+
 const submit = async () => {
   error.value = ''
+  notice.value = ''
   submitting.value = true
   try {
     const { run_id: runId } = await api.stressStart({ ...form })
@@ -182,9 +217,9 @@ const deleteRun = async (run) => {
 }
 
 onMounted(async () => {
-  await store.load()
-  applyDefaults()
-  await loadRuns()
+  // force=true：提交任务后返回本页时 store 中仍是旧 meta，
+  // 不强制刷新会让表单沿用上一次的配置（看起来像没读到历史配置）
+  await loadAll(true)
   timer = setInterval(() => {
     if (hasRunning.value) loadRuns()
   }, 5000)
@@ -199,11 +234,13 @@ onUnmounted(() => timer && clearInterval(timer))
       <div class="sub">调用 evalscope 对本地模型服务压测：并发 / 阶梯加压、首字延迟、吞吐与缓存命中</div>
     </div>
     <div class="actions">
+      <button class="btn" :disabled="refreshing" @click="loadAll(true)">刷新配置</button>
       <button class="btn" @click="loadRuns">刷新列表</button>
     </div>
   </div>
 
   <div v-if="error" class="alert bad">{{ error }}</div>
+  <div v-if="notice" class="alert info">{{ notice }}</div>
   <div v-if="!evalscope.available" class="alert warn">
     evalscope 当前不可用：{{ evalscope.error || '未找到可执行文件' }}。
     安装后可自动识别（pip install evalscope），或用环境变量 EVALSCOPE_BIN 指定完整路径。
@@ -215,6 +252,7 @@ onUnmounted(() => timer && clearInterval(timer))
       evalscope 请求 <code>/chat/completions</code>。此处可填写到端口（如
       <code>http://10.174.0.70:34000</code>），或已含 <code>/v1</code> 前缀的地址，
       缺失的 <code>/chat/completions</code> 会自动补全。
+      <span v-if="savedAt"> · 表单已沿用上次保存的配置（{{ savedAt }}）</span>
     </p>
 
     <div class="grid">
@@ -475,6 +513,9 @@ onUnmounted(() => timer && clearInterval(timer))
     <div class="row mt">
       <button class="btn primary" :disabled="submitting || !evalscope.available" @click="submit">
         {{ submitting ? '正在启动…' : '启动压测' }}
+      </button>
+      <button class="btn" :disabled="saving" @click="saveConfig">
+        {{ saving ? '保存中…' : '保存配置' }}
       </button>
       <span class="muted">启动后进入任务详情页，可实时查看 RPS / 延迟曲线与逐请求明细。</span>
     </div>

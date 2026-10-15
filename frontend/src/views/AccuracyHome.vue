@@ -110,7 +110,9 @@ const deleteRun = async (run) => {
 }
 
 onMounted(async () => {
-  await loadAll()
+  // force=true：提交任务后返回本页时 store 中仍是旧 meta，
+  // 不强制刷新会让表单沿用上一次的配置（与压测页同一口径）
+  await loadAll(true)
   timer = setInterval(() => {
     if (hasRunning.value) loadRuns()
   }, 5000)
