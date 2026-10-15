@@ -3,7 +3,7 @@ import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { RouterLink, useRoute, useRouter } from 'vue-router'
 import { api } from '../api'
 import { Card, KvList, LogPanel, ProgressBar, StatTile, StatusBadge } from '../components/index.js'
-import { compact, duration, int, isRunning, ms, num, pct, shortFixed } from '../format'
+import { compact, duration, int, isActive, isRunning, ms, num, pct, shortFixed } from '../format'
 
 const route = useRoute()
 const router = useRouter()
@@ -20,6 +20,10 @@ let timer = null
 let tick = 0
 
 const running = computed(() => isRunning(snap.value && snap.value.status))
+// 排队中同样要保持轮询：等本任务开跑后页面自动切到实时进度
+const active = computed(() => isActive(snap.value && snap.value.status))
+// 排队位置 1 表示下一个开跑，前面还有 position-1 个任务
+const queueAhead = computed(() => Math.max(0, ((snap.value && snap.value.queue_position) || 1) - 1))
 const gen = computed(() => (snap.value && snap.value.gen) || {})
 const judge = computed(() => (snap.value && snap.value.judge) || {})
 const summary = computed(() => (snap.value && snap.value.summary) || {})
@@ -126,7 +130,7 @@ onMounted(async () => {
   await loadSnap()
   await loadItems()
   timer = setInterval(() => {
-    if (running.value) tickLoop()
+    if (active.value) tickLoop()
   }, 2000)
 })
 onUnmounted(() => timer && clearInterval(timer))
@@ -147,12 +151,18 @@ onUnmounted(() => timer && clearInterval(timer))
       <RouterLink class="btn" to="/accuracy">返回列表</RouterLink>
       <RouterLink class="btn" :to="`/accuracy/${runId}/csv`">结果表格</RouterLink>
       <a class="btn" :href="`/api/accuracy/runs/${runId}/download.csv`">下载 CSV</a>
-      <button v-if="running" class="btn danger" :disabled="busy" @click="stopRun">停止</button>
+      <button v-if="active" class="btn danger" :disabled="busy" @click="stopRun">
+        {{ running ? '停止' : '取消排队' }}
+      </button>
       <button class="btn danger" :disabled="busy" @click="deleteRun">删除</button>
     </div>
   </div>
 
   <div v-if="error" class="alert bad">{{ error }}</div>
+  <div v-if="snap && snap.status === 'queued'" class="alert warn">
+    该任务正在全局测试队列中排队（前面还有 {{ queueAhead }} 个任务）。
+    前序任务完全结束后才会开始，两次任务之间会留出资源释放间隔，以避免并行测试导致结果失准。
+  </div>
   <div v-if="snap && snap.error" class="alert bad">失败原因：{{ snap.error }}</div>
   <div v-if="snap && snap.summary && snap.summary._stopped" class="alert warn">
     该任务在完成前被停止，汇总仅覆盖已完成的部分。

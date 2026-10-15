@@ -5,11 +5,12 @@ import { api } from '../api'
 import { store } from '../store'
 import { ProgressBar, StatusBadge } from '../components/ui'
 import { Card } from '../components/index.js'
-import { duration, int, isRunning, pct } from '../format'
+import { duration, int, isActive, isRunning, pct } from '../format'
 
 const router = useRouter()
 const form = reactive({})
 const runs = ref([])
+const queueInfo = ref(null)
 const error = ref('')
 const submitting = ref(false)
 const refreshing = ref(false)
@@ -23,7 +24,22 @@ const savedAt = computed(() => {
   const t = store.meta && store.meta.accuracy.saved_cfg_at
   return t ? new Date(t * 1000).toLocaleString() : ''
 })
-const hasRunning = computed(() => runs.value.some((r) => isRunning(r.status)))
+// 排队中的任务也在等状态变化，列表同样需要自动刷新
+const hasActive = computed(() => runs.value.some((r) => isActive(r.status)))
+
+// 全局队列概览：精度与压测共用一条串行队列，避免并行测试互相抢资源
+const queueText = computed(() => {
+  const q = queueInfo.value
+  if (!q) return ''
+  const parts = []
+  if (q.running) parts.push(`${q.running.kind_text} ${q.running.run_id} 运行中`)
+  const count = q.pending_count || 0
+  if (count) {
+    const next = (q.pending || [])[0] || {}
+    parts.push(`排队 ${count} 个${next.run_id ? `（下一个 ${next.kind_text} ${next.run_id}）` : ''}`)
+  }
+  return parts.join(' · ')
+})
 
 const applyDefaults = () => {
   const d = store.accuracyDefaults
@@ -56,6 +72,11 @@ const loadRuns = async () => {
     runs.value = data.runs || []
   } catch (e) {
     error.value = e.message
+  }
+  try {
+    queueInfo.value = await api.queue()
+  } catch (e) {
+    queueInfo.value = null              // 队列概览只是辅助信息，拉取失败不影响列表
   }
 }
 
@@ -115,7 +136,7 @@ onMounted(async () => {
   // 不强制刷新会让表单沿用上一次的配置（与压测页同一口径）
   await loadAll(true)
   timer = setInterval(() => {
-    if (hasRunning.value) loadRuns()
+    if (hasActive.value) loadRuns()
   }, 5000)
 })
 onUnmounted(() => timer && clearInterval(timer))
@@ -264,7 +285,8 @@ onUnmounted(() => timer && clearInterval(timer))
   </section>
 
   <Card title="历史任务">
-    <p class="hint">共 {{ runs.length }} 个任务{{ hasRunning ? ' · 有任务正在运行，列表每 5 秒自动刷新' : '' }}</p>
+    <p class="hint">共 {{ runs.length }} 个任务{{ hasActive ? ' · 有任务正在运行或排队，列表每 5 秒自动刷新' : '' }}</p>
+    <p v-if="queueText" class="hint">全局测试队列：{{ queueText }}（精度与压测共用，严格串行、逐个执行）</p>
     <div v-if="!runs.length" class="empty">暂无评测任务</div>
     <div v-else class="table-wrap">
       <table>
@@ -306,12 +328,12 @@ onUnmounted(() => timer && clearInterval(timer))
               <div class="row">
                 <RouterLink class="btn sm" :to="`/accuracy/${run.run_id}`">详情</RouterLink>
                 <button
-                  v-if="isRunning(run.status)"
+                  v-if="isActive(run.status)"
                   class="btn sm danger"
                   :disabled="busyId === run.run_id"
                   @click="stopRun(run)"
                 >
-                  停止
+                  {{ isRunning(run.status) ? '停止' : '取消排队' }}
                 </button>
                 <button
                   class="btn sm danger"

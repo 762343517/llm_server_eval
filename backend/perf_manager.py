@@ -22,14 +22,15 @@ from collections import deque
 
 import perf_core
 import run_manager as rm
+import task_queue
 
 STRESS_SUBDIR = "stress"
 LAST_CFG = ".last_stress_config.json"
 ARGS_NAME = "args.json"
 MAX_LOGS = 200
 MAX_RECORDS = 200000            # 内存中保留的明细上限，防止超长压测占满内存
-STATUS_TEXT = {"running": "压测中", "succeeded": "已完成", "failed": "失败",
-               "stopped": "已停止", "interrupted": "已中断"}
+STATUS_TEXT = {"queued": "排队中", "running": "压测中", "succeeded": "已完成",
+               "failed": "失败", "stopped": "已停止", "interrupted": "已中断"}
 MASK = "***"
 PROC_NAME = "proc.json"          # 运行中的进程组信息，后端重启后据此接管残留进程
 TERM_STEPS = ((signal.SIGTERM, 2.0), (signal.SIGKILL, 3.0))
@@ -306,7 +307,9 @@ class StressRun:
                 "started_at_str": rm.fmt_time(self.started_at),
                 "finished_at": self.finished_at,
                 "finished_at_str": rm.fmt_time(self.finished_at),
-                "duration_s": round((self.finished_at or time.time()) - self.started_at, 1),
+                # 排队中尚未开始压测，耗时不进入统计（前端显示为 —）
+                "duration_s": 0.0 if self.status == "queued" else round(
+                    (self.finished_at or time.time()) - self.started_at, 1),
                 "cfg": self._safe_cfg(),
                 "target": "{} · {}".format(self.cfg.get("endpoint", ""),
                                            self.cfg.get("model", "")),
@@ -498,13 +501,14 @@ class StressManager:
         self.base = os.path.abspath(os.path.join(runs_dir or rm.RUNS_DIR,
                                                  STRESS_SUBDIR))
         self._states = {}
-        self._threads = {}
         self._lock = threading.Lock()
         self._reap_orphans()
+        # 上次服务退出时排队中的任务已经无法执行，收敛为「已中断」
+        task_queue.mark_stale_queued(self.base)
 
     # ---------------------------------------------------------------- 启动
     def start(self, cfg):
-        """校验配置并后台启动一次压测，返回 run_id。"""
+        """校验配置并把压测任务加入全局队列，返回 run_id（轮到本任务时才开跑）。"""
         cfg = dict(cfg)
         perf_core.validate(cfg)             # 校验失败时抛 ValueError，由调用方转 400
         # 预检目标可达性：地址/端口填错时立即失败，不必等 evalscope 的 connect_test 超时
@@ -517,15 +521,33 @@ class StressManager:
         run_id = rm.new_run_id()
         cfg["run_id"] = run_id              # 使结果中带上本平台的任务号
         state = StressRun(run_id, cfg, self.base)
-        state.log("[准备] 正在生成 evalscope 数据集")
+        state.status = "queued"
+        state.progress = {"stage": "排队中", "text": "等待前序任务完成", "pct": 0.0}
+        state.log("[排队] 已加入全局测试队列，等待前序任务完成")
         with self._lock:
             self._states[run_id] = state
         state.save()
-        thread = threading.Thread(target=state.worker, name="stress-" + run_id, daemon=True)
-        with self._lock:
-            self._threads[run_id] = thread
-        thread.start()
+        task_queue.QUEUE.submit("stress", run_id, lambda: self._run_queued(state))
         return run_id
+
+    def _run_queued(self, state):
+        """队列轮到本任务：正式开跑并阻塞到压测完全结束（供队列串行调度）。"""
+        if state.deleted:
+            return
+        if state.stop_event.is_set():
+            state.status = "stopped"
+            state.error = "排队期间已被取消"
+            state.finished_at = time.time()
+            state.progress = {"stage": "已取消", "text": "排队期间被取消", "pct": 0.0}
+            state.save()
+            return
+        state.status = "running"
+        state.started_at = time.time()       # 时长只统计真正压测的时间
+        state.phase = "init"
+        state.progress = {"stage": "准备中", "text": "正在生成数据集", "pct": 0.0}
+        state.log("[开始] 轮到本任务，正在生成 evalscope 数据集")
+        state.save()
+        state.worker()
 
     # ---------------------------------------------------------------- 查询
     def get(self, run_id):
@@ -634,6 +656,17 @@ class StressManager:
         with self._lock:
             state = self._states.get(run_id)
         if state is not None and not state.deleted:
+            if state.status == "queued":
+                # 排队中的任务尚未开跑：直接从队列摘除并收敛为「已停止」
+                task_queue.QUEUE.cancel(run_id)
+                state.stop_event.set()
+                state.status = "stopped"
+                state.error = "排队期间被手动取消"
+                state.finished_at = time.time()
+                state.progress = {"stage": "已取消", "text": "排队期间被取消", "pct": 0.0}
+                state.log("[停止] 排队中的任务已取消")
+                state.save()
+                return True
             if state.status != "running":
                 return False
             state.log("[停止] 收到停止请求")
@@ -706,8 +739,7 @@ class StressManager:
         existed = state is not None or os.path.isdir(path)
         if os.path.isdir(path):
             shutil.rmtree(path, ignore_errors=True)
-        with self._lock:
-            self._threads.pop(run_id, None)
+        task_queue.QUEUE.cancel(run_id)      # 排队中的任务直接摘除，不再等待执行
         return existed
 
     def cancel_all(self):

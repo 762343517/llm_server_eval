@@ -29,6 +29,7 @@ import eval_core      # noqa: E402
 import perf_core      # noqa: E402
 import perf_manager   # noqa: E402
 import run_manager    # noqa: E402
+import task_queue     # noqa: E402
 
 WEBUI_DIR = os.path.join(BASE_DIR, "webui")
 
@@ -48,7 +49,7 @@ async def lifespan(_app):
 app = FastAPI(title=appconfig.APP_TITLE, lifespan=lifespan)
 
 ACC_STATUS_TEXT = {
-    "running": "运行中", "succeeded": "已完成",
+    "queued": "排队中", "running": "运行中", "succeeded": "已完成",
     "failed": "失败", "stopped": "已停止", "interrupted": "已中断",
 }
 
@@ -86,6 +87,7 @@ def _decorate(runs):
     """为精度任务列表补充前端渲染所需的派生字段。"""
     for r in runs:
         r["status_text"] = ACC_STATUS_TEXT.get(r.get("status"), r.get("status"))
+        r["queue_position"] = task_queue.QUEUE.position(r.get("run_id"))
         s = r.get("summary") or {}
         r["pass_at_1"] = s.get("pass_at_1")
         r["n_done"] = s.get("num_questions")
@@ -94,6 +96,13 @@ def _decorate(runs):
         r["stage"] = prog.get("stage", "")
         r["pct"] = prog.get("pct", 0.0)
     return runs
+
+
+# ---------------------------------------------------------------- 全局队列
+@app.get("/api/queue")
+def queue_state():
+    """全局测试队列快照：正在运行的任务 + 排队中的任务（精度与压测共用）。"""
+    return JSONResponse(task_queue.QUEUE.snapshot())
 
 
 # ---------------------------------------------------------------- 元信息
@@ -222,6 +231,7 @@ def accuracy_status(run_id: str):
     if not snap:
         raise HTTPException(404, "任务不存在")
     snap["status_text"] = ACC_STATUS_TEXT.get(snap.get("status"), snap.get("status"))
+    snap["queue_position"] = task_queue.QUEUE.position(run_id)
     prog = snap.get("progress") or {}
     snap["stage"] = prog.get("stage", "")
     snap["pct"] = prog.get("pct", 0.0)
@@ -414,7 +424,10 @@ def _save_stress_last_cfg(cfg, raw_payload):
 
 @app.get("/api/stress/runs")
 def stress_runs():
-    return JSONResponse({"runs": stress.list_runs()})
+    runs = stress.list_runs()
+    for r in runs:
+        r["queue_position"] = task_queue.QUEUE.position(r.get("run_id"))
+    return JSONResponse({"runs": runs})
 
 
 @app.post("/api/stress/runs")
@@ -461,6 +474,7 @@ def stress_status(run_id: str):
     snap = stress.get(run_id)
     if not snap:
         raise HTTPException(404, "任务不存在")
+    snap["queue_position"] = task_queue.QUEUE.position(run_id)
     return JSONResponse(snap)
 
 

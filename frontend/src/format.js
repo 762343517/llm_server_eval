@@ -53,6 +53,7 @@ export const compact = (value) => {
 }
 
 const STATUS_KIND = {
+  queued: 'warn',
   running: 'busy',
   succeeded: 'ok',
   failed: 'bad',
@@ -62,6 +63,8 @@ const STATUS_KIND = {
 
 export const statusKind = (status) => STATUS_KIND[status] || 'off'
 export const isRunning = (status) => status === 'running'
+// 排队中与运行中都属于「未结束」：列表和详情页需要继续轮询等待其开始/完成
+export const isActive = (status) => status === 'running' || status === 'queued'
 
 // 长文本截断（表格中展示模型回答）
 export const clip = (text, max = 120) => {

@@ -14,6 +14,7 @@ import time
 from datetime import datetime, timedelta, timezone
 
 import eval_core
+import task_queue
 
 RUNS_DIR = os.environ.get("RUNS_DIR", "runs")
 
@@ -95,7 +96,8 @@ class RunState:
         self.meta_path = os.path.join(self.dir, "meta.json")
         # 可重入锁：on_event 持锁期间会调用 log()/snapshot()，普通 Lock 会导致自锁
         self.lock = threading.RLock()
-        self.status = "running"      # running | succeeded | failed | stopped
+        # queued（排队中）| running | succeeded | failed | stopped | interrupted
+        self.status = "running"
         self.phase = "init"          # init|gen|judge|summary|done
         self.error = None
         self.started_at = time.time()
@@ -201,7 +203,8 @@ class RunState:
                 "finished_at": self.finished_at,
                 "started_at_str": _fmt(self.started_at),
                 "finished_at_str": _fmt(self.finished_at),
-                "duration_s": round(
+                # 排队中尚未开始执行，耗时不进入统计（前端显示为 —）
+                "duration_s": 0.0 if self.status == "queued" else round(
                     (self.finished_at or time.time()) - self.started_at, 1),
                 "load": dict(self.load),
                 "gen": dict(self.gen),
@@ -215,6 +218,8 @@ class RunState:
 
     def _progress(self):
         """归一化总体进度百分比与阶段描述。"""
+        if self.status == "queued":
+            return {"stage": "排队中", "pct": 0.0, "text": "等待前序任务完成"}
         if self.phase == "gen" and self.gen["todo"]:
             return {"stage": "生成", "pct": round(
                 100 * self.gen["done"] / self.gen["todo"], 1),
@@ -253,9 +258,12 @@ class RunManager:
         self._states = {}
         self._lock = threading.Lock()
         os.makedirs(runs_dir, exist_ok=True)
+        # 上次服务退出时排在队列里的任务无法恢复执行，收敛为「已中断」
+        task_queue.mark_stale_queued(runs_dir)
 
     # -------------------------------------------------- 启动/停止
     def start(self, cfg):
+        """创建任务并加入全局队列，返回 run_id（轮到本任务时才开始跑）。"""
         run_id = new_run_id()
         out = os.path.join(self.runs_dir, run_id, "out")
         os.makedirs(os.path.dirname(out), exist_ok=True)
@@ -264,16 +272,33 @@ class RunManager:
             if safe_cfg.get(k):
                 safe_cfg[k] = _mask(safe_cfg[k])
         state = RunState(run_id, safe_cfg, out)
+        state.status = "queued"
         with self._lock:
             self._states[run_id] = state
-        state.log("[启动] 模型 {} 端点 {} 裁判模型 {} 裁判端点 {}".format(
-            cfg.get("model"), cfg.get("endpoint"), cfg.get("judge_model"),
-            cfg.get("judge_endpoint") or cfg.get("endpoint")))
+        state.log("[排队] 已加入全局测试队列，等待前序任务完成")
         state.save()
-        t = threading.Thread(target=self._worker, args=(state, cfg),
-                             daemon=True, name=f"run-{run_id}")
-        t.start()
+        task_queue.QUEUE.submit("accuracy", run_id,
+                                lambda: self._run_queued(state, cfg))
         return run_id
+
+    def _run_queued(self, state, cfg):
+        """队列轮到本任务：正式开跑并阻塞到任务完全结束（供队列串行调度）。"""
+        if state.deleted:
+            return
+        if state.stop_event.is_set():
+            state.status = "stopped"
+            state.error = "排队期间已被取消"
+            state.finished_at = time.time()
+            state.save()
+            return
+        state.status = "running"
+        state.started_at = time.time()       # 时长只统计真正执行的时间
+        state.log("[开始] 轮到本任务，模型 {} 端点 {} 裁判模型 {} 裁判端点 {}".format(
+            state.cfg.get("model"), state.cfg.get("endpoint"),
+            state.cfg.get("judge_model"),
+            state.cfg.get("judge_endpoint") or state.cfg.get("endpoint")))
+        state.save()
+        self._worker(state, cfg)
 
     def _worker(self, state, cfg):
         cfg = dict(cfg)
@@ -305,6 +330,16 @@ class RunManager:
         st = self._states.get(run_id)
         if not st:
             return False
+        if st.status == "queued":
+            # 排队中的任务尚未开跑：直接从队列摘除并收敛为「已停止」
+            task_queue.QUEUE.cancel(run_id)
+            st.stop_event.set()
+            st.status = "stopped"
+            st.error = "排队期间被手动取消"
+            st.finished_at = time.time()
+            st.log("[停止] 排队中的任务已取消")
+            st.save()
+            return True
         st.stop_event.set()
         st.log("[停止] 收到停止请求，等待在飞请求返回…")
         return True
@@ -401,6 +436,7 @@ class RunManager:
             existed = os.path.isdir(target)
             shutil.rmtree(target, ignore_errors=True)
             return existed
+        task_queue.QUEUE.cancel(run_id)     # 排队中的任务直接摘除，不再等待执行
         with st.lock:                       # 与 save() 互斥，避免任务被重新写回
             st.deleted = True
             st.stop_event.set()

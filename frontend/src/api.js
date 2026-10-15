@@ -33,6 +33,9 @@ const query = (params) => {
 export const api = {
   meta: () => request('/api/meta'),
 
+  // 全局测试队列：精度与压测共用，展示正在运行与排队中的任务
+  queue: () => request('/api/queue'),
+
   csv: (path, limit) => request(`/api/csv${query({ path, limit })}`),
   csvDownload: (path) => `/api/csv/download${query({ path })}`,
 
