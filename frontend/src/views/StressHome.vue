@@ -3,7 +3,7 @@ import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { RouterLink, useRouter } from 'vue-router'
 import { api } from '../api'
 import { store } from '../store'
-import { ProgressBar, StatTile, StatusBadge } from '../components/index.js'
+import { Card, ProgressBar, StatTile, StatusBadge } from '../components/index.js'
 import { compact, duration, int, isRunning, ms, num, pct } from '../format'
 
 const router = useRouter()
@@ -247,7 +247,7 @@ onUnmounted(() => timer && clearInterval(timer))
   </div>
 
   <section class="card">
-    <h2>新建压测任务</h2>
+    <Card title="新建压测任务" nested>
     <p class="hint">
       evalscope 请求 <code>/chat/completions</code>。此处可填写到端口（如
       <code>http://10.174.0.70:34000</code>），或已含 <code>/v1</code> 前缀的地址，
@@ -282,7 +282,8 @@ onUnmounted(() => timer && clearInterval(timer))
       </div>
     </div>
 
-    <h2 class="mt">请求场景</h2>
+    </Card>
+    <Card title="请求场景" nested>
     <div class="grid">
       <div class="field span-2">
         <label>请求模式</label>
@@ -425,7 +426,8 @@ onUnmounted(() => timer && clearInterval(timer))
       </div>
     </div>
 
-    <h2 class="mt">负载模型</h2>
+    </Card>
+    <Card title="负载模型" nested>
     <div class="grid">
       <div class="field">
         <label>加压方式</label>
@@ -510,6 +512,7 @@ onUnmounted(() => timer && clearInterval(timer))
       </template>
     </div>
 
+    </Card>
     <div class="row mt">
       <button class="btn primary" :disabled="submitting || !evalscope.available" @click="submit">
         {{ submitting ? '正在启动…' : '启动压测' }}
@@ -521,8 +524,7 @@ onUnmounted(() => timer && clearInterval(timer))
     </div>
   </section>
 
-  <section class="card">
-    <h2>压测任务</h2>
+  <Card title="压测任务">
     <p class="hint">共 {{ runs.length }} 个任务{{ hasRunning ? ' · 有任务正在运行，列表每 5 秒自动刷新' : '' }}</p>
     <div v-if="!runs.length" class="empty">暂无压测任务</div>
     <div v-else class="table-wrap">
@@ -605,5 +607,5 @@ onUnmounted(() => timer && clearInterval(timer))
         </tbody>
       </table>
     </div>
-  </section>
+  </Card>
 </template>

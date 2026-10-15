@@ -4,6 +4,7 @@ import { RouterLink, useRouter } from 'vue-router'
 import { api } from '../api'
 import { store } from '../store'
 import { ProgressBar, StatusBadge } from '../components/ui'
+import { Card } from '../components/index.js'
 import { duration, int, isRunning, pct } from '../format'
 
 const router = useRouter()
@@ -137,7 +138,7 @@ onUnmounted(() => timer && clearInterval(timer))
   </div>
 
   <section class="card">
-    <h2>新建评测任务</h2>
+    <Card title="新建评测任务" nested>
     <p class="hint">
       裁判端点 / 密钥留空时复用被测模型的配置
       <span v-if="savedAt"> · 表单已沿用上次提交的配置（{{ savedAt }}）</span>
@@ -170,7 +171,8 @@ onUnmounted(() => timer && clearInterval(timer))
       </div>
     </div>
 
-    <h2 class="mt">数据集</h2>
+    </Card>
+    <Card title="数据集" nested>
     <div class="grid wide">
       <div class="field">
         <label>内置数据集</label>
@@ -195,7 +197,8 @@ onUnmounted(() => timer && clearInterval(timer))
       </div>
     </div>
 
-    <h2 class="mt">生成与判分参数</h2>
+    </Card>
+    <Card title="生成与判分参数" nested>
     <div class="grid">
       <div class="field">
         <label>思考模式</label>
@@ -251,6 +254,7 @@ onUnmounted(() => timer && clearInterval(timer))
       </div>
     </div>
 
+    </Card>
     <div class="row mt">
       <button class="btn primary" :disabled="submitting" @click="submit">
         {{ submitting ? '正在启动…' : '启动评测' }}
@@ -259,8 +263,7 @@ onUnmounted(() => timer && clearInterval(timer))
     </div>
   </section>
 
-  <section class="card">
-    <h2>历史任务</h2>
+  <Card title="历史任务">
     <p class="hint">共 {{ runs.length }} 个任务{{ hasRunning ? ' · 有任务正在运行，列表每 5 秒自动刷新' : '' }}</p>
     <div v-if="!runs.length" class="empty">暂无评测任务</div>
     <div v-else class="table-wrap">
@@ -323,5 +326,5 @@ onUnmounted(() => timer && clearInterval(timer))
         </tbody>
       </table>
     </div>
-  </section>
+  </Card>
 </template>

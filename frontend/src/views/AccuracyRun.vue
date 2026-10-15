@@ -2,7 +2,7 @@
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { RouterLink, useRoute, useRouter } from 'vue-router'
 import { api } from '../api'
-import { KvList, LogPanel, ProgressBar, StatTile, StatusBadge } from '../components/index.js'
+import { Card, KvList, LogPanel, ProgressBar, StatTile, StatusBadge } from '../components/index.js'
 import { compact, duration, int, isRunning, ms, num, pct, shortFixed } from '../format'
 
 const route = useRoute()
@@ -158,8 +158,7 @@ onUnmounted(() => timer && clearInterval(timer))
     该任务在完成前被停止，汇总仅覆盖已完成的部分。
   </div>
 
-  <section v-if="snap" class="card">
-    <h2>运行进度</h2>
+  <Card v-if="snap" title="运行进度">
     <div class="muted">
       {{ snap.progress.stage }} · {{ snap.progress.text }}开始于 {{ snap.started_at_str }}
       <span v-if="snap.finished_at_str"> · 结束于 {{ snap.finished_at_str }}</span>
@@ -183,16 +182,14 @@ onUnmounted(() => timer && clearInterval(timer))
       <StatTile label="数据集" :value="int((snap.load || {}).total)" sub="题" />
       <StatTile label="耗时" :value="duration(snap.duration_s)" />
     </div>
-  </section>
+  </Card>
 
-  <section v-if="snap" class="card">
-    <h2>配置参数</h2>
+  <Card v-if="snap" title="配置参数">
     <p class="hint">本次评测提交的运行配置（API Key 已脱敏）</p>
     <KvList :items="cfgRows" />
-  </section>
+  </Card>
 
-  <section class="card">
-    <h2>逐题结果</h2>
+  <Card title="逐题结果">
     <p class="hint">
       共 {{ itemTotal }} 条{{ running ? '（任务运行中，每 10 秒自动刷新）' : '' }}
     </p>
@@ -265,16 +262,14 @@ onUnmounted(() => timer && clearInterval(timer))
         </tbody>
       </table>
     </div>
-  </section>
+  </Card>
 
-  <section v-if="summaryRows.length" class="card">
-    <h2>汇总数据</h2>
+  <Card v-if="summaryRows.length" title="汇总数据">
     <p class="hint">summarise() 输出的原始字段，与结果 JSON 一致</p>
     <KvList :items="summaryRows.map(([k, v]) => ({ k, v }))" />
-  </section>
+  </Card>
 
-  <section class="card">
-    <h2>运行日志</h2>
+  <Card title="运行日志">
     <LogPanel :logs="(snap && snap.logs) || []" />
-  </section>
+  </Card>
 </template>

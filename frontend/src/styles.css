@@ -41,6 +41,11 @@ code, .mono {
   gap: 24px;
   min-height: 58px;
   flex-wrap: wrap;
+  /* 固定在视口顶部：长页面滚动时导航不随内容上移。
+     sticky 而非 fixed：仍占文档流高度，无需给 main 补 padding */
+  position: sticky;
+  top: 0;
+  z-index: 20;
 }
 
 .brand { font-size: 16px; font-weight: 600; letter-spacing: 0.2px; }
@@ -82,15 +87,60 @@ code, .mono {
   padding: 18px 20px;
   margin-bottom: 18px;
 }
-.card > h2 {
+.card > h2, .card-head {
   font-size: 15px;
   margin: 0 0 4px;
   display: flex;
   align-items: center;
   gap: 8px;
 }
-.card > .hint { color: var(--ink-soft); font-size: 12.5px; margin: 0 0 14px; }
+.card > .hint, .card-body > .hint { color: var(--ink-soft); font-size: 12.5px; margin: 0 0 14px; }
 .card-actions { margin-left: auto; display: flex; gap: 8px; }
+
+/* 可折叠板块：标题整行可点，箭头指示展开状态 */
+.card-toggle {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.card-toggle:hover { color: var(--primary); }
+.chev {
+  flex: none;
+  width: 0;
+  height: 0;
+  border-left: 5px solid currentColor;
+  border-top: 4.5px solid transparent;
+  border-bottom: 4.5px solid transparent;
+  opacity: 0.55;
+  transition: transform 0.15s ease;
+}
+.chev.open { transform: rotate(90deg); }
+.card-head:hover .chev { opacity: 1; }
+.card.collapsed > .card-head { margin-bottom: 0; }
+
+/* 同一张卡片里的多个板块：只留白 + 分隔线，不重复卡片边框 */
+.card.nested {
+  background: none;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  padding: 0;
+  margin-bottom: 0;
+}
+.card.nested + .card.nested {
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+}
 
 /* ---------------------------------------------------------------- 表单 */
 .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 14px 18px; }

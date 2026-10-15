@@ -2,7 +2,7 @@
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { RouterLink, useRoute, useRouter } from 'vue-router'
 import { api } from '../api'
-import { KvList, LogPanel, MiniChart, ProgressBar, StatTile, StatusBadge } from '../components/index.js'
+import { Card, KvList, LogPanel, MiniChart, ProgressBar, StatTile, StatusBadge } from '../components/index.js'
 import { compact, duration, int, isRunning, ms, num, pct, shortFixed } from '../format'
 
 const route = useRoute()
@@ -327,8 +327,7 @@ onUnmounted(() => timer && clearInterval(timer))
     </ul>
   </div>
 
-  <section v-if="snap" class="card">
-    <h2>运行进度</h2>
+  <Card v-if="snap" title="运行进度">
     <div class="muted">
       {{ snap.progress.stage }} · {{ snap.progress.text }} · 开始于 {{ snap.started_at_str }}
       <span v-if="snap.finished_at_str"> · 结束于 {{ snap.finished_at_str }}</span>
@@ -370,22 +369,19 @@ onUnmounted(() => timer && clearInterval(timer))
       />
       <StatTile label="压测总时长" :value="duration(metrics.total_duration_s)" />
     </div>
-  </section>
+  </Card>
 
-  <section v-if="snap" class="card">
-    <h2>配置参数</h2>
+  <Card v-if="snap" title="配置参数">
     <p class="hint">本次压测提交的运行配置（API Key 已脱敏）</p>
     <KvList :items="cfgRows" />
-  </section>
+  </Card>
 
-  <section class="card">
-    <h2>实时曲线</h2>
+  <Card title="实时曲线">
     <p class="hint">按时间分桶（每桶最多 60 个点）{{ running ? ' · 运行中每 6 秒刷新' : '' }}</p>
     <MiniChart :points="chartPoints" :series="chartSeries" />
-  </section>
+  </Card>
 
-  <section v-if="isRamp" class="card">
-    <h2>阶梯并发对比</h2>
+  <Card v-if="isRamp" title="阶梯并发对比">
     <div class="table-wrap">
       <table>
         <thead>
@@ -418,10 +414,9 @@ onUnmounted(() => timer && clearInterval(timer))
         </tbody>
       </table>
     </div>
-  </section>
+  </Card>
 
-  <section v-if="conv" class="card">
-    <h2>多轮会话指标</h2>
+  <Card v-if="conv" title="多轮会话指标">
     <p class="hint">模型将上一轮回答作为上下文，用于评估长上下文与 KV 缓存复用</p>
     <div class="stats">
       <StatTile
@@ -458,10 +453,9 @@ onUnmounted(() => timer && clearInterval(timer))
         </tbody>
       </table>
     </div>
-  </section>
+  </Card>
 
-  <section class="card">
-    <h2>逐请求明细</h2>
+  <Card title="逐请求明细">
     <p class="hint">共 {{ recordTotal }} 条{{ running ? ' · 运行中每 10 秒刷新' : '' }}</p>
     <div class="filters">
       <label class="check">
@@ -525,19 +519,17 @@ onUnmounted(() => timer && clearInterval(timer))
         </tbody>
       </table>
     </div>
-  </section>
+  </Card>
 
-  <section v-if="showArgs" class="card">
-    <h2>运行参数（api_key 已脱敏）</h2>
+  <Card v-if="showArgs" title="运行参数（api_key 已脱敏）">
     <p class="hint">evalscope 命令行与本次运行参数，原文见任务目录 args.json。</p>
     <details class="scenario" open>
       <summary>args.json</summary>
       <pre>{{ args || '加载中…' }}</pre>
     </details>
-  </section>
+  </Card>
 
-  <section class="card">
-    <h2>原始产物</h2>
+  <Card title="原始产物">
     <p class="hint">
       evalscope 直接生成的报告文件，可在线查看或下载完整原文；可视化报告为交互式 HTML，
       图表脚本取自 CDN，离线环境图表不显示，下载到本地打开即可
@@ -587,10 +579,9 @@ onUnmounted(() => timer && clearInterval(timer))
       <pre v-else-if="preview.loading">加载中…</pre>
       <pre v-else>{{ preview.text }}</pre>
     </div>
-  </section>
+  </Card>
 
-  <section class="card">
-    <h2>运行日志</h2>
+  <Card title="运行日志">
     <LogPanel :logs="(snap && snap.logs) || []" />
-  </section>
+  </Card>
 </template>

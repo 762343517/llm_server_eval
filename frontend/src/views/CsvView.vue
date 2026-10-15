@@ -2,7 +2,7 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import { RouterLink } from 'vue-router'
 import { api } from '../api'
-import { CsvTable } from '../components/index.js'
+import { Card, CsvTable } from '../components/index.js'
 
 // source: workspace（工作区文件）| accuracy（评测逐题 CSV）| stress（压测逐请求 CSV）
 const props = defineProps({
@@ -69,7 +69,7 @@ watch(() => [props.path, props.id, props.source], load)
     </div>
   </div>
 
-  <section class="card">
+  <Card title="数据预览">
     <CsvTable
       :data="data"
       :loading="loading"
@@ -77,5 +77,5 @@ watch(() => [props.path, props.id, props.source], load)
       :fixed="source === 'accuracy'"
       @update:limit="setLimit"
     />
-  </section>
+  </Card>
 </template>
