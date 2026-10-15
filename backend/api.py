@@ -277,7 +277,7 @@ def accuracy_download_csv(run_id: str):
 # ---------------------------------------------------------------- 压力测试
 # 参数上限保护：防止误操作压垮目标服务，或使单轮压测长时间无法结束
 STRESS_CAPS = {"max_tokens": 131072, "turns": 100, "concurrent_users": 1024,
-               "iterations": 10000, "timeout": 3600, "ramp_pause_seconds": 3600,
+               "numbers": 100000, "timeout": 3600, "ramp_pause_seconds": 3600,
                "level": 1024, "levels": 20, "seq_length": 2097152,
                "output_length": 131072, "prefix_length": 2097152,
                "warmup_num": 100000}
@@ -299,18 +299,55 @@ def _tokens(value, key, label, default=0):
     return tokens
 
 
-def _stress_cfg(payload):
-    """校验并归一化压测配置，供 perf_manager 生成 evalscope 数据集与命令行。"""
-    mode = "ramp" if (payload.get("concurrency_mode") or "fixed") == "ramp" else "fixed"
-    levels_text = payload.get("ramp_levels_text") or ""
-    levels = appconfig.parse_levels(levels_text) if mode == "ramp" else []
-    if mode == "ramp" and not levels:
+def _ramp_pairs(payload):
+    """解析阶梯档位：--parallel 与 --number 两个列表按位置一一对应。
+
+    档位升序去重后返回 (并发数, 请求数) 列表；只填一个请求数时视为各档相同。
+    """
+    level_items = appconfig.parse_int_list(payload.get("ramp_levels_text"), "并发档位")
+    if not level_items:
         raise ValueError("阶梯模式至少需要一个并发档位，例如 2,4,8,16")
-    for level in levels:
+    number_items = appconfig.parse_int_list(payload.get("ramp_numbers_text"), "各档请求数")
+    if not number_items:
+        raise ValueError("阶梯模式需要各档请求数（--number），例如 6,12,24,48")
+    if len(number_items) == 1:
+        number_items = number_items * len(level_items)
+    if len(number_items) != len(level_items):
+        raise ValueError("各档请求数需与并发档位一一对应（数量一致，或只填一个值）")
+    pairs = {}
+    for level, number in zip(level_items, number_items):
+        pairs.setdefault(level, number)          # 档位重复时取首次出现的请求数
+    ordered = sorted(pairs.items())
+    for level, _ in ordered:
         if level > STRESS_CAPS["level"]:
             raise ValueError("并发档位不能超过 {}".format(STRESS_CAPS["level"]))
-    if len(levels) > STRESS_CAPS["levels"]:
+    if len(ordered) > STRESS_CAPS["levels"]:
         raise ValueError("并发档位最多 {} 个".format(STRESS_CAPS["levels"]))
+    for _, number in ordered:
+        if number > STRESS_CAPS["numbers"]:
+            raise ValueError("各档请求数不能超过 {}".format(STRESS_CAPS["numbers"]))
+    return ordered
+
+
+def _stress_cfg(payload):
+    """校验并归一化压测配置，供 perf_manager 生成 evalscope 数据集与命令行。
+
+    请求数口径与 evalscope 一致：`--parallel` 是并发数（同时发起的请求数），
+    `--number` 是本次（本档）要发出的请求总数，二者不做相互换算。
+    """
+    mode = "ramp" if (payload.get("concurrency_mode") or "fixed") == "ramp" else "fixed"
+    if mode == "ramp":
+        ordered = _ramp_pairs(payload)
+        levels = [level for level, _ in ordered]
+        numbers = [number for _, number in ordered]
+        # 阶梯模式下固定并发的输入框不参与本次压测，快照回填最大档位，
+        # 避免残留的默认值（如 8）在结果页被误读成本次生效的并发
+        concurrent_users = max(levels)
+    else:
+        levels = []
+        numbers = [max(1, _capped(payload.get("numbers"), "numbers", "请求数"))]
+        concurrent_users = max(
+            1, _capped(payload.get("concurrent_users"), "concurrent_users", "并发数"))
 
     prompt_mode = "long" if (payload.get("prompt_mode") or "") == "long" else "chat"
     cfg = {
@@ -332,11 +369,9 @@ def _stress_cfg(payload):
         "turns": max(1, _capped(payload.get("turns"), "turns", "对话轮数")),
         "unique_prefix": bool(payload.get("unique_prefix")),
         "concurrency_mode": mode,
-        # 阶梯模式下固定并发的输入框不参与本次压测，快照回填最大档位，
-        # 避免残留的默认值（如 8）在结果页被误读成本次生效的并发
-        "concurrent_users": max(levels) if mode == "ramp" else max(
-            1, _capped(payload.get("concurrent_users"), "concurrent_users", "并发用户数")),
-        "iterations": max(1, _capped(payload.get("iterations"), "iterations", "迭代次数")),
+        "concurrent_users": concurrent_users,
+        # evalscope --number：固定并发 = [请求总数]；阶梯 = 与 ramp_levels 同序的各档请求数
+        "numbers": numbers,
         "ramp_levels": levels,
         "ramp_pause_seconds": max(0.0, min(
             _float(payload.get("ramp_pause_seconds"),
@@ -367,7 +402,13 @@ def _stress_cfg(payload):
 
 def _save_stress_last_cfg(cfg, raw_payload):
     saved = {k: cfg[k] for k in appconfig.stress_defaults() if k in cfg}
+    if cfg.get("concurrency_mode") == "ramp":
+        # 阶梯模式下 numbers 是与档位对应的列表，表单回填用 ramp_numbers_text
+        saved.pop("numbers", None)
+    else:
+        saved["numbers"] = cfg["numbers"][0]
     saved["ramp_levels_text"] = (raw_payload.get("ramp_levels_text") or "").strip()
+    saved["ramp_numbers_text"] = (raw_payload.get("ramp_numbers_text") or "").strip()
     appconfig.save_last_cfg(appconfig.LAST_STRESS_CFG_NAME, saved)
 
 

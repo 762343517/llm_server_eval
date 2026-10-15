@@ -270,6 +270,7 @@ class StressRun:
         if safe.get("api_key"):
             safe["api_key"] = rm.mask_secret(safe["api_key"])
         safe.pop("ramp_levels_text", None)
+        safe.pop("ramp_numbers_text", None)
         # 固定前缀内容可能是整篇文档，快照只保留长度，正文落在任务目录 prefix.txt
         content = safe.pop("prefix_content", "")
         if content:

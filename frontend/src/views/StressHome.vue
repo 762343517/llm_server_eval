@@ -17,22 +17,68 @@ let timer = null
 const evalscope = computed(() => store.evalscope)
 const hasRunning = computed(() => runs.value.some((r) => isRunning(r.status)))
 
-const levels = computed(() =>
-  String(form.ramp_levels_text || '')
+const splitInts = (text) =>
+  String(text || '')
     .replace(/，/g, ',')
     .split(',')
     .map((s) => parseInt(s.trim(), 10))
-    .filter((n) => Number.isFinite(n) && n > 0),
-)
+    .filter((n) => Number.isFinite(n) && n > 0)
+
+const trimNum = (v) =>
+  Number.isInteger(v) ? String(v) : v.toFixed(2).replace(/0+$/, '').replace(/\.$/, '')
+
+// evalscope 口径：--parallel 是并发数（同时发起的请求数）
+const levels = computed(() => splitInts(form.ramp_levels_text))
+// --number 是本档要发出的请求总数；chat 多轮模式下该值是会话数
+const numbers = computed(() => splitInts(form.ramp_numbers_text))
 
 // 长序列模式：序列长度 / 固定前缀 / 变长后缀 / Prefix Cache 命中率
 const isLong = computed(() => form.prompt_mode === 'long')
 const hasCustomPrefix = computed(() => Boolean(String(form.prefix_content || '').trim()))
 
-// 阶梯加压时该值是每一档的请求/会话数，固定并发时是单个并发下的数量
-const iterationsLabel = computed(() => {
-  const unit = isLong.value ? '请求数' : '会话数'
-  return form.concurrency_mode === 'ramp' ? `每档并发${unit}` : `每个并发${unit}`
+// 请求数的单位：long 单轮即请求数；chat 多轮下 --number 是会话数
+const countUnit = computed(() => (isLong.value ? '请求数' : '会话数'))
+const countTip = computed(() =>
+  isLong.value
+    ? '本次压测发出的请求总数（evalscope --number）'
+    : `本次压测发起的会话总数；每会话串行 ${Number(form.turns) || 1} 轮请求，实际请求数 = 会话数 × 轮数`,
+)
+
+// 阶梯模式：--parallel 与 --number 一一对应（升序去重配对，与后端 _ramp_pairs 同口径）
+const rampPairs = computed(() => {
+  const users = levels.value
+  let counts = numbers.value
+  if (!users.length || !counts.length) return []
+  if (counts.length === 1) counts = users.map(() => counts[0])
+  if (counts.length !== users.length) return []
+  const pairs = new Map()
+  users.forEach((u, i) => {
+    if (!pairs.has(u)) pairs.set(u, counts[i])
+  })
+  return [...pairs.entries()].sort((a, b) => a[0] - b[0])
+})
+
+// 请求数个数既不是 1 也不等于档位数时无法一一对应（后端同样会拒绝）
+const rampMismatch = computed(
+  () =>
+    form.concurrency_mode === 'ramp' &&
+    levels.value.length > 0 &&
+    numbers.value.length > 1 &&
+    numbers.value.length !== levels.value.length,
+)
+
+// 派生展示：一个并发串行发出的请求数 = --number ÷ --parallel
+const perParallel = computed(() => {
+  if (form.concurrency_mode === 'ramp') {
+    if (!rampPairs.value.length) return '—'
+    const vals = rampPairs.value.map(([u, n]) => n / u)
+    const low = Math.min(...vals)
+    const high = Math.max(...vals)
+    return low === high ? trimNum(low) : `${trimNum(low)} ~ ${trimNum(high)}`
+  }
+  const users = Number(form.concurrent_users) || 0
+  const count = Number(form.numbers) || 0
+  return users && count ? trimNum(count / users) : '—'
 })
 
 // 与后端 perf_core.parse_tokens 同口径：支持 128000 / 128K / 1M（K=1000、M=1000000）
@@ -69,6 +115,18 @@ const applyPreset = (totalTokens, ratio) => {
 
 const isLongCfg = (cfg) => Boolean(cfg && cfg.prompt_mode === 'long')
 
+// 快照里的请求数：新配置是 --number 列表（与并发档位同序）；早期快照只有 iterations
+// （每个并发的请求数），按并发数换算回 --number 显示。
+const cfgNumbers = (cfg) => {
+  if (!cfg) return []
+  const list = cfg.numbers
+  if (Array.isArray(list) && list.length) return list
+  const legacy = cfg.iterations
+  if (legacy === null || legacy === undefined || legacy === '') return []
+  const users = isRampCfg(cfg) ? (cfg.ramp_levels || []) : [cfg.concurrent_users]
+  return users.map((u) => (Number(u) || 0) * Number(legacy))
+}
+
 // 加压方式以快照的 concurrency_mode 为准：两种方式下另一组的字段都是表单残留值
 const isRampCfg = (cfg) => {
   if (!cfg) return false
@@ -77,12 +135,12 @@ const isRampCfg = (cfg) => {
 }
 
 const expected = computed(() => {
-  const users =
+  const counts =
     form.concurrency_mode === 'ramp'
-      ? levels.value.reduce((a, b) => a + b, 0)
-      : Number(form.concurrent_users) || 0
+      ? rampPairs.value.reduce((sum, [, n]) => sum + n, 0)
+      : Number(form.numbers) || 0
   const turns = isLong.value ? 1 : Number(form.turns) || 1
-  return users * (Number(form.iterations) || 0) * turns
+  return counts * turns
 })
 
 const applyDefaults = () => {
@@ -355,29 +413,58 @@ onUnmounted(() => timer && clearInterval(timer))
       </div>
       <template v-if="form.concurrency_mode === 'fixed'">
         <div class="field">
-          <label>并发用户数</label>
+          <label>并发数（--parallel）</label>
           <input v-model.number="form.concurrent_users" type="number" min="1" max="1024" />
+          <span class="tip">同时发起的请求数</span>
+        </div>
+        <div class="field">
+          <label>{{ countUnit }}（--number）</label>
+          <input v-model.number="form.numbers" type="number" min="1" max="100000" />
+          <span class="tip">{{ countTip }}</span>
         </div>
       </template>
       <template v-else>
         <div class="field">
-          <label>并发档位（逗号分隔，自动升序）</label>
+          <label>并发档位（--parallel，逗号分隔，自动升序去重）</label>
           <input v-model.trim="form.ramp_levels_text" type="text" placeholder="2, 4, 8, 16" />
+          <span class="tip">每个档位同时发起的请求数</span>
+        </div>
+        <div class="field">
+          <label>各档{{ countUnit }}（--number，与档位一一对应）</label>
+          <input v-model.trim="form.ramp_numbers_text" type="text" placeholder="6, 12, 24, 48" />
+          <span class="tip" :class="{ warn: rampMismatch }">
+            {{
+              rampMismatch
+                ? `档位 ${levels.length} 个、请求数 ${numbers.length} 个，数量需一致（或只填一个值表示各档相同）`
+                : `本档要发出的${countUnit}；只填一个值表示各档相同`
+            }}
+          </span>
         </div>
         <div class="field">
           <label>档位间隔（秒，0 = 跑完即换档）</label>
           <input v-model.number="form.ramp_pause_seconds" type="number" min="0" max="3600" />
         </div>
       </template>
-      <div class="field">
-        <label>{{ iterationsLabel }}</label>
-        <input v-model.number="form.iterations" type="number" min="1" max="10000" />
-      </div>
     </div>
 
     <div class="stats mt">
-      <StatTile label="预计请求数" :value="int(expected)" sub="次" />
-      <StatTile label="并发档位" :value="form.concurrency_mode === 'ramp' ? levels.join(' / ') || '—' : form.concurrent_users" />
+      <StatTile label="预计请求数" :value="int(expected)" :sub="isLong ? '次（--number 之和）' : '次（会话数 × 轮数）'" />
+      <StatTile
+        label="并发数（--parallel）"
+        :value="form.concurrency_mode === 'ramp'
+          ? rampPairs.map(([u]) => u).join(' / ') || '—'
+          : form.concurrent_users"
+      />
+      <StatTile
+        v-if="form.concurrency_mode === 'ramp'"
+        :label="`各档${countUnit}（--number）`"
+        :value="rampPairs.map(([, n]) => n).join(' / ') || '—'"
+      />
+      <StatTile
+        label="每个并发请求数"
+        :value="perParallel"
+        :sub="isLong ? '--number ÷ --parallel' : '会话数 ÷ 并发数'"
+      />
       <template v-if="isLong">
         <StatTile label="序列长度" :value="compact(seqLength)" sub="tokens" />
         <StatTile
@@ -445,14 +532,22 @@ onUnmounted(() => timer && clearInterval(timer))
             </td>
             <td class="nowrap">
               <template v-if="isRampCfg(run.cfg)">
-                阶梯 {{ (run.cfg.ramp_levels || []).join('/') || '—' }}
+                并发 {{ (run.cfg.ramp_levels || []).join('/') || '—' }}
+                · {{ isLongCfg(run.cfg) ? '请求' : '会话' }}
+                {{ cfgNumbers(run.cfg).join('/') || '—' }}
               </template>
-              <template v-else>并发 {{ (run.cfg && run.cfg.concurrent_users) || '—' }}</template>
+              <template v-else>
+                并发 {{ (run.cfg && run.cfg.concurrent_users) || '—' }}
+                · {{ isLongCfg(run.cfg) ? '请求' : '会话' }}
+                {{ cfgNumbers(run.cfg)[0] || '—' }}
+              </template>
               <div v-if="isLongCfg(run.cfg)" class="muted">
                 序列 {{ run.cfg.seq_length }} tokens ·
                 {{ run.cfg.prefix_content_chars ? '固定前缀内容' : `命中率 ${pct(run.cfg.prefix_cache_ratio)}` }}
               </div>
-              <div v-else class="muted">×{{ (run.cfg && run.cfg.iterations) || '—' }} 轮，{{ (run.cfg && run.cfg.turns) || 1 }} 轮对话</div>
+              <div v-else class="muted">
+                {{ (run.cfg && run.cfg.turns) || 1 }} 轮对话 · 共 {{ int(run.expected) }} 次请求
+              </div>
             </td>
             <td style="min-width: 170px">
               <div class="muted">{{ (run.progress && run.progress.stage) || '' }}</div>

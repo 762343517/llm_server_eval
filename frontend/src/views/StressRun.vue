@@ -31,6 +31,20 @@ const conv = computed(() => snap.value && snap.value.conv)
 const isRamp = computed(() => byLevel.value.length > 0)
 const cfg = computed(() => (snap.value && snap.value.cfg) || {})
 
+// 快照里的请求数：新配置是 numbers（= evalscope --number，与并发档位同序）；早期快照只有
+// iterations（每个并发的请求数），按并发数换算回 --number 显示。
+const cfgNumbers = (c) => {
+  if (!c) return []
+  if (Array.isArray(c.numbers) && c.numbers.length) return c.numbers
+  const legacy = c.iterations
+  if (legacy === null || legacy === undefined || legacy === '') return []
+  const ramp = c.concurrency_mode
+    ? c.concurrency_mode === 'ramp'
+    : Array.isArray(c.ramp_levels) && c.ramp_levels.length > 0
+  const users = ramp ? (c.ramp_levels || []) : [c.concurrent_users]
+  return users.map((u) => (Number(u) || 0) * Number(legacy))
+}
+
 const cfgRows = computed(() => {
   const c = cfg.value
   const text = (v) => (v === null || v === undefined || v === '' ? '—' : String(v))
@@ -97,10 +111,12 @@ const cfgRows = computed(() => {
   )
   // 两种加压方式的生效字段不同：concurrent_users 在阶梯模式下是表单残留值，
   // ramp_levels 在固定并发下同理，因此各自只展示本轮真正生效的那组。
+  // 请求数口径与 evalscope 一致：numbers 就是 --number 列表（早期快照只有 iterations）
+  const counts = cfgNumbers(c)
   if (isRampCfg) {
     rows.push(
       {
-        k: '并发档位',
+        k: '并发档位（--parallel）',
         v: Array.isArray(c.ramp_levels) && c.ramp_levels.length ? c.ramp_levels.join(' / ') : '—',
       },
       {
@@ -109,12 +125,18 @@ const cfgRows = computed(() => {
           ? '—'
           : `${c.ramp_pause_seconds}s`,
       },
-      { k: isLong ? '每档并发请求数' : '每档并发会话数', v: text(c.iterations) },
+      {
+        k: isLong ? '各档请求数（--number）' : '各档会话数（--number）',
+        v: counts.length ? counts.join(' / ') : '—',
+      },
     )
   } else {
     rows.push(
-      { k: '并发用户数', v: text(c.concurrent_users) },
-      { k: isLong ? '每个并发请求数' : '每个并发会话数', v: text(c.iterations) },
+      { k: '并发数（--parallel）', v: text(c.concurrent_users) },
+      {
+        k: isLong ? '请求数（--number）' : '会话数（--number）',
+        v: counts.length ? text(counts[0]) : '—',
+      },
     )
   }
   return rows

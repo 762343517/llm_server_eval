@@ -247,9 +247,19 @@ def levels(cfg):
     return [max(1, int(cfg.get("concurrent_users") or 1))]
 
 
-def conversation_count(cfg, users):
-    """单个并发档位的会话数（evalscope 多轮模式下 --number 表示会话数）。"""
-    return max(1, int(users)) * max(1, int(cfg.get("iterations") or 1))
+def numbers(cfg):
+    """evalscope `--number` 列表，与 levels(cfg) 同序一一对应。
+
+    口径与 evalscope 一致：`--number` 为本档要发出的请求总数（chat 多轮模式下为会话数），
+    `--parallel` 为并发数，两者不做换算。早期快照缺少 numbers 时回退到旧口径
+    （--number = 并发数 × 每个并发的请求数），保证历史任务仍可复现。
+    """
+    users = levels(cfg)
+    raw = cfg.get("numbers") or []
+    if len(raw) == len(users):
+        return [max(1, int(x)) for x in raw]
+    legacy = max(1, int(cfg.get("iterations") or 1))
+    return [max(1, int(u)) * legacy for u in users]
 
 
 def expected_requests(cfg):
@@ -258,7 +268,7 @@ def expected_requests(cfg):
     chat 模式 = 会话数 × 轮次；long 模式为单轮请求，不再乘轮次。
     """
     turns = 1 if prompt_mode(cfg) == MODE_LONG else max(1, int(cfg.get("turns") or 1))
-    return sum(conversation_count(cfg, u) for u in levels(cfg)) * turns
+    return sum(numbers(cfg)) * turns
 
 
 # --------------------------------------------------------------------- 长序列模式
@@ -428,7 +438,7 @@ def build_dataset(cfg, path):
         if long_dataset(cfg) == DATASET_RANDOM:
             return path
         return _build_long_dataset(cfg, path)
-    rows = max(conversation_count(cfg, u) for u in levels(cfg))
+    rows = max(numbers(cfg))
     if not bool(cfg.get("unique_prefix")):
         rows = 1
     with open(path, "w", encoding="utf-8") as f:
@@ -451,7 +461,7 @@ def _build_long_dataset(cfg, path):
         f.write(content if content.endswith("\n") else content + "\n")
     question = (cfg.get("prompt") or "").strip() or DEFAULT_LONG_QUESTION
     # 每条请求的提问（= 前缀之后的可变后缀）都不同，避免后缀也整体命中缓存
-    rows = max(conversation_count(cfg, u) for u in levels(cfg))
+    rows = max(numbers(cfg))
     with open(path, "w", encoding="utf-8") as f:
         for i in range(rows):
             f.write("{}{}\n".format(question, "" if rows == 1 else "（第 {} 条请求）".format(i + 1)))
@@ -464,7 +474,7 @@ def build_command(cfg, run_dir, dataset_path=None):
     if not model:
         raise ValueError("模型名不能为空")
     users = levels(cfg)
-    numbers = [conversation_count(cfg, u) for u in users]
+    numbers_list = numbers(cfg)
     dataset, ds_path, ds_args = dataset_spec(cfg, run_dir)
 
     cmd = command_prefix() + [
@@ -485,7 +495,7 @@ def build_command(cfg, run_dir, dataset_path=None):
             "--max-turns", str(max(1, int(cfg.get("turns") or 1))),
         ]
     cmd += [
-        "--number", *[str(n) for n in numbers],
+        "--number", *[str(n) for n in numbers_list],
         "--parallel", *[str(u) for u in users],
         "--sleep-interval",
         str(int(max(0.0, float(cfg.get("ramp_pause_seconds") or 0.0)))),
@@ -572,9 +582,9 @@ def dump_args(cfg, run_dir, dataset_path=None):
         "timeout": cfg.get("timeout"),
         "turns": max(1, int(cfg.get("turns") or 1)),
         "unique_prefix": bool(cfg.get("unique_prefix")),
-        "iterations": cfg.get("iterations"),
-        "levels": [{"parallel": u, "number": conversation_count(cfg, u)}
-                   for u in levels(cfg)],
+        "numbers": cfg.get("numbers") or numbers(cfg),
+        "levels": [{"parallel": u, "number": n}
+                   for u, n in zip(levels(cfg), numbers(cfg))],
         "sleep_interval": cfg.get("ramp_pause_seconds"),
         "expected_requests": expected_requests(cfg),
         "api_key": "***" if (cfg.get("api_key") or "").strip() else "",

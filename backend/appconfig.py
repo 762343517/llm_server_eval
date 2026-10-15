@@ -107,8 +107,9 @@ def stress_defaults():
         "unique_prefix": False,
         "concurrency_mode": consts.DEFAULT_STRESS_CONCURRENCY_MODE,
         "concurrent_users": consts.DEFAULT_STRESS_CONCURRENT_USERS,
-        "iterations": consts.DEFAULT_STRESS_ITERATIONS,
+        "numbers": consts.DEFAULT_STRESS_NUMBERS,
         "ramp_levels_text": consts.DEFAULT_STRESS_RAMP_LEVELS_TEXT,
+        "ramp_numbers_text": consts.DEFAULT_STRESS_RAMP_NUMBERS_TEXT,
         "ramp_pause_seconds": consts.DEFAULT_STRESS_RAMP_PAUSE_SECONDS,
         "prompt_mode": consts.DEFAULT_STRESS_PROMPT_MODE,
         "tokenizer_path": consts.DEFAULT_STRESS_TOKENIZER_PATH,
@@ -127,13 +128,13 @@ def stress_defaults():
     return d
 
 
-def parse_levels(text):
-    """解析阶梯并发的档位文本（如 "2,4,8,16"）-> 升序去重的整数列表。"""
+def parse_int_list(text, label="数值"):
+    """解析逗号分隔的正整数列表（如 "2,4,8,16" / "6, 12, 24, 48"），保序不去重。"""
     if isinstance(text, (list, tuple)):
         raw = list(text)
     else:
         raw = str(text or "").replace("，", ",").split(",")
-    levels = []
+    values = []
     for item in raw:
         item = str(item).strip()
         if not item:
@@ -141,8 +142,13 @@ def parse_levels(text):
         try:
             value = int(float(item))
         except ValueError:
-            raise ValueError("并发档位必须是逗号分隔的整数: " + text)
+            raise ValueError("{}必须是逗号分隔的整数: {}".format(label, text))
         if value < 1:
-            raise ValueError("并发档位必须大于 0: " + text)
-        levels.append(value)
-    return sorted(set(levels))
+            raise ValueError("{}必须大于 0: {}".format(label, text))
+        values.append(value)
+    return values
+
+
+def parse_levels(text):
+    """解析阶梯并发的档位文本（如 "2,4,8,16"）-> 升序去重的整数列表。"""
+    return sorted(set(parse_int_list(text, "并发档位")))

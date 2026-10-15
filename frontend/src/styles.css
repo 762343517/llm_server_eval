@@ -99,6 +99,7 @@ code, .mono {
 .field.span-2 { grid-column: span 2; }
 .field label { font-size: 12.5px; color: #374151; font-weight: 500; }
 .field .tip { font-size: 11.5px; color: var(--ink-soft); }
+.field .tip.warn { color: var(--warn); }
 
 input[type="text"], input[type="password"], input[type="number"], select, textarea {
   width: 100%;
