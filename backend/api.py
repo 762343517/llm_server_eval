@@ -34,6 +34,7 @@ import perf_core      # noqa: E402
 import perf_manager   # noqa: E402
 import run_manager    # noqa: E402
 import task_queue     # noqa: E402
+import utils          # noqa: E402
 
 WEBUI_DIR = os.path.join(BASE_DIR, "webui")
 
@@ -65,18 +66,9 @@ ACC_STATUS_TEXT = {
 
 
 # ---------------------------------------------------------------- 小工具
-def _int(value, default=0):
-    try:
-        return int(float(value))
-    except (TypeError, ValueError):
-        return default
-
-
-def _float(value, default=0.0):
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return default
+# 数值兜底统一收敛到 utils（原先 api / agent_core / perf_core 各写一份，口径容易走偏）
+_int = utils.int_or
+_float = utils.float_or
 
 
 def _mtime(path):
@@ -702,9 +694,13 @@ def _agent_cfg(payload):
 
 
 @app.get("/api/agent/env")
-def agent_env():
-    """环境自检（页面顶部的就绪状态）。"""
-    return JSONResponse(agent_core.env_report(use_cache=False))
+def agent_env(force: int = 0):
+    """环境自检（页面顶部的就绪状态）。
+
+    走 env_report 的分层缓存（静态项 5 分钟 / docker 状态 10 秒），不再每次进页面都
+    全量探测——`pier --version` 单项就要十几秒；force=1 用于「重新检测」按钮。
+    """
+    return JSONResponse(agent_core.env_report(use_cache=not force))
 
 
 @app.get("/api/agent/tasks")

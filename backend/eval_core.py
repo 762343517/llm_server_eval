@@ -15,12 +15,12 @@ import sys
 import threading
 import time
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
-from datetime import datetime, timedelta, timezone
 
 import pandas as pd
 import requests
 
 import dataset_registry
+import utils
 
 ANSWER_PROMPT = """Your response should be in the following format:
 Explanation: {{your explanation for your final answer}}
@@ -492,33 +492,15 @@ def thinking_label(thinking, reasoning_effort=""):
 _LOG_REQ = (os.environ.get("ZHIPU_EVAL_LOG_REQ") or "1").strip().lower() not in (
     "0", "false", "no", "off")
 
-_TZ_LOCAL_NAMES = ("", "local", "system", "localtime")
-_TZ_PLUS8_NAMES = ("asia/shanghai", "asia/chongqing", "asia/harbin", "asia/urumqi",
-                   "prc")
-
-
-def _display_tz():
-    """日志时间按展示时区渲染（默认东八区），避免容器 UTC 环境下相差 8 小时。"""
-    name = (os.environ.get("ZHIPU_EVAL_TZ") or "Asia/Shanghai").strip()
-    if name.lower() in _TZ_LOCAL_NAMES:
-        return None
-    try:
-        from zoneinfo import ZoneInfo
-
-        return ZoneInfo(name)
-    except Exception:  # noqa: BLE001 镜像缺 tzdata 时东八区退回固定 +08:00
-        return timezone(timedelta(hours=8)) if name.lower() in _TZ_PLUS8_NAMES else None
-
-
 class _TZFormatter(logging.Formatter):
+    """日志时间按展示时区渲染（默认东八区），避免容器 UTC 环境下相差 8 小时。"""
+
     def __init__(self):
         super().__init__("%(asctime)s [%(levelname)s] %(message)s")
-        self._tz = _display_tz()
+        self._tz = utils.display_tz()
 
     def formatTime(self, record, datefmt=None):
-        dt = (datetime.fromtimestamp(record.created) if self._tz is None
-              else datetime.fromtimestamp(record.created, self._tz))
-        return dt.strftime(datefmt or "%Y-%m-%d %H:%M:%S")
+        return utils.format_ts(record.created, datefmt or utils.TIME_FMT, self._tz)
 
 
 logger = logging.getLogger("zhipu_eval")

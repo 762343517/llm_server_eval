@@ -41,6 +41,7 @@ from datetime import datetime, timedelta
 from urllib.parse import urlsplit
 
 import consts
+import utils
 
 CLI_NAME = "evalscope"
 API_NAME = "openai"                       # 被测服务统一按 OpenAI 兼容协议访问
@@ -851,20 +852,11 @@ def dump_args(cfg, run_dir, dataset_path=None):
 
 # --------------------------------------------------------------------- 结果解析
 def _num(value, default=0.0):
-    try:
-        out = float(value)
-    except (TypeError, ValueError):
-        return default
-    return out if out == out else default          # NaN -> default
+    """指标解析：非数字与 NaN 都回落到 default（NaN 口径与别处的 float_or 不同）。"""
+    return utils.float_or(value, default, nan_to_default=True)
 
 
-def _opt_num(value):
-    if value is None:
-        return None
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
+_opt_num = utils.float_or_none
 
 
 def _level_of_dir(path):

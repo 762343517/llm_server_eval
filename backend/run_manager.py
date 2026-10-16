@@ -16,48 +16,25 @@ import re
 import shutil
 import threading
 import time
-from datetime import datetime, timedelta, timezone
 
 import eval_core
 import task_queue
+import utils
 
 RUNS_DIR = os.environ.get("RUNS_DIR", "runs")
 
 # run_id 直接参与路径拼接（删除时会执行 rmtree），必须拦截 ".." 等越权名称
 _RUN_ID_RE = re.compile(r"^(?!.*\.\.)[0-9A-Za-z][0-9A-Za-z._-]{0,63}$")
 
-TIME_FMT = "%Y-%m-%d %H:%M:%S"
-
-# 展示时区：容器/服务器多以 UTC 运行，直接按系统时区渲染会比本地时间少 8 小时。
-# 通过 ZHIPU_EVAL_TZ 指定（默认东八区），设为 local/system 则沿用系统时区。
-TZ_NAME = (os.environ.get("ZHIPU_EVAL_TZ") or "Asia/Shanghai").strip()
-_LOCAL_TZ = TZ_NAME.lower() in ("", "local", "system", "localtime")
-# 无法加载命名时区（镜像缺 tzdata）时，这些名字退回固定 +08:00
-_TZ_PLUS8 = ("asia/shanghai", "asia/chongqing", "asia/harbin", "asia/urumqi", "prc")
-
-
-def _load_tz(name):
-    if _LOCAL_TZ:
-        return None
-    try:
-        from zoneinfo import ZoneInfo
-        return ZoneInfo(name)
-    except Exception:  # noqa: BLE001
-        if name.lower() in _TZ_PLUS8:
-            return timezone(timedelta(hours=8))
-        return None
-
-
-DISPLAY_TZ = _load_tz(TZ_NAME)
+# 展示时区与时间格式化统一在 utils（原先与 eval_core 各写一份）
+TIME_FMT = utils.TIME_FMT
+TZ_NAME = utils.tz_name()
+DISPLAY_TZ = utils.display_tz(TZ_NAME)
 
 
 def _fmt(ts, fmt=TIME_FMT):
     """按展示时区格式化时间戳；ts 为 None 时返回 None。"""
-    if ts is None:
-        return None
-    dt = (datetime.fromtimestamp(ts) if DISPLAY_TZ is None
-          else datetime.fromtimestamp(ts, DISPLAY_TZ))
-    return dt.strftime(fmt)
+    return utils.format_ts(ts, fmt, DISPLAY_TZ)
 
 
 def _now():

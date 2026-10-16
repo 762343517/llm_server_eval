@@ -12,6 +12,7 @@
 """
 import calendar
 import collections
+import glob
 import json
 import os
 import random
@@ -25,6 +26,7 @@ import time
 
 import consts
 import dataset_registry
+import utils
 
 try:                                    # Python >= 3.11 自带 tomllib，3.10 用 tomli
     import tomllib as _toml
@@ -38,6 +40,13 @@ FRAMEWORK = "pier"
 PIER_COMMAND = "pier"
 PIER_FALLBACK_BIN = os.path.expanduser("~/.local/bin/pier")   # uv tool 安装的默认位置
 
+# pier CLI 一启动就会 import LiteLLM，而 LiteLLM 默认去 GitHub 拉 model cost map 做定价；
+# 内网拉不通时它要重试 3 次并退避，于是单次 `pier --version` 要 22.7s（实测），每次
+# `pier run` 也要先白付这笔时间。置为 True 表示只用随包分发的本地价目表（不影响模型调用）；
+# 子进程继承本进程的环境变量，因此 uvicorn 与 CLI 两条入口都从这里生效。
+# 用 setdefault：外部显式设置过就不覆盖。
+os.environ.setdefault("LITELLM_LOCAL_MODEL_COST_MAP", "True")
+
 # pier 在 allow_internet=false 的任务里起 squid 做 egress 代理，配置把「安全端口」写死为
 # 80/443，自部署模型端点（如 http://10.174.0.70:34000/v1）会被 `deny !Safe_ports` 拒绝，
 # agent 因此拿不到模型响应（表现为 agent 空转、超时）。这里把安全端口放宽到非特权端口：
@@ -50,6 +59,9 @@ EGRESS_SAFE_PORTS_OK = ("acl Safe_ports port 80 443 3000-65535",
 
 _IMAGE_CACHE = {"at": 0.0, "tags": set()}
 _IMAGE_TTL = 60.0
+# docker daemon 状态变化快（用户可能刚起停 docker），缓存只用来压掉同一批请求里的重复探测
+_DOCKER_CACHE = {"at": 0.0, "data": None}
+_DOCKER_TTL = 10.0
 LOG_TAIL_LINES = 200          # pier 原始输出的回看行数（失败时给出更多现场）
 
 
@@ -80,13 +92,39 @@ def pier_bin():
 
 
 def pier_version():
-    """pier 版本号（未安装时返回空串）。"""
+    """pier 版本号（未安装时返回空串）。
+
+    优先读安装目录里的 dist-info 元数据（零子进程）：`pier --version` 要起一次 CLI，
+    导入开销以秒计（见 LITELLM_LOCAL_MODEL_COST_MAP 处的说明），而环境自检在页面
+    每次加载时都可能问一次版本。读不到（非 uv tool 安装等）再回退到 CLI。
+    """
     binary = pier_bin()
     if not binary:
         return ""
+    version = _pier_version_from_metadata(binary)
+    if version:
+        return version
     rc, out = _run([binary, "--version"], timeout=60)
     match = re.search(r"(\d+\.\d+\.\d+\S*)", out)
     return match.group(1) if rc == 0 and match else ""
+
+
+def _pier_version_from_metadata(binary):
+    """从 <venv>/lib/python3.*/site-packages/datacurve_pier-*.dist-info/METADATA 取版本。"""
+    venv = os.path.dirname(os.path.dirname(os.path.realpath(binary)))
+    pattern = os.path.join(venv, "lib", "python3.*", "site-packages",
+                           "datacurve_pier-*.dist-info", "METADATA")
+    for path in sorted(glob.glob(pattern)):
+        try:
+            with open(path, encoding="utf-8", errors="replace") as fh:
+                for line in fh:
+                    if line.startswith("Version:"):
+                        return line.split(":", 1)[1].strip()
+                    if not line.strip():        # 头部结束，后面不再是键值对
+                        break
+        except OSError:
+            continue
+    return ""
 
 
 def docker_state():
@@ -102,6 +140,19 @@ def docker_state():
                 "detail": "当前进程没有 docker 组权限，已改用 sg docker 执行"}
     return {"ok": False, "mode": "none", "version": "",
             "detail": direct_error or _last_line(out2) or "docker 不可用"}
+
+
+def docker_state_cached(use_cache=True):
+    """docker 可用性（短缓存）：只压掉同一批页面请求里的重复探测。
+
+    docker daemon 可能刚被起停，TTL 远短于 pier/egress 这类静态项（见 _static_env）。
+    """
+    now = time.time()
+    if use_cache and _DOCKER_CACHE["data"] and now - _DOCKER_CACHE["at"] < _DOCKER_TTL:
+        return _DOCKER_CACHE["data"]
+    state = docker_state()
+    _DOCKER_CACHE.update({"at": now, "data": state})
+    return state
 
 
 def wrap_argv(argv, mode):
@@ -232,11 +283,8 @@ def _read_toml(path):
     return data if isinstance(data, dict) else {}
 
 
-def _num(value, default=0.0):
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return default
+# 数值兜底统一收敛到 utils（原先 api / agent_core / perf_core 各写一份）
+_num = utils.float_or
 
 
 def list_tasks(directory):
@@ -297,29 +345,43 @@ def resolve_tasks_dir(path):
 
 # ------------------------------------------------------------------ 环境自检
 _ENV_CACHE = {"at": 0.0, "data": None}
-_ENV_TTL = 20.0
+_ENV_TTL = 300.0              # 静态项（pier / egress / TOML）5 分钟复检一次
 
 
 def env_report(use_cache=True):
     """环境自检：docker / pier / egress 端口适配 / TOML 解析库。
 
     返回的 notes 直接作为「发起前提示」写进任务日志；ok=false 时不允许发起。
-    自检要起子进程（docker info / pier --version），页面每次加载都调用，因此结果
-    短暂缓存；真正发起任务时用 use_cache=False 复核。
+    自检要起子进程（docker info / pier 探测），而页面每次加载都会调用，因此分两层缓存：
+    静态项（pier 路径与版本、egress 补丁状态、TOML 库）5 分钟复检一次，
+    docker daemon 状态 10 秒（用户可能刚起停 docker，需要及时反映）；
+    真正发起任务时用 use_cache=False 全部复核。
     """
+    return _env_report(use_cache)
+
+
+def _static_env(use_cache=True):
+    """自检里「慢、且只在重装 pier 或改配置时才变」的部分。"""
     now = time.time()
     if use_cache and _ENV_CACHE["data"] and now - _ENV_CACHE["at"] < _ENV_TTL:
         return _ENV_CACHE["data"]
-    report = _env_report()
-    _ENV_CACHE.update({"at": now, "data": report})
-    return report
-
-
-def _env_report():
-    docker = docker_state()
     binary = pier_bin()
-    version = pier_version() if binary else ""
-    egress = egress_state()
+    data = {
+        "pier": {"available": bool(binary), "path": binary,
+                 "version": pier_version() if binary else ""},
+        "egress": egress_state(),
+        "toml": _toml is not None,
+    }
+    _ENV_CACHE.update({"at": now, "data": data})
+    return data
+
+
+def _env_report(use_cache=True):
+    docker = docker_state_cached(use_cache)
+    static = _static_env(use_cache)
+    binary = static["pier"]["path"]
+    version = static["pier"]["version"]
+    egress = static["egress"]
     notes = []
     if not binary:
         notes.append("未找到 pier 命令：请先 uv tool install datacurve-pier")
@@ -341,11 +403,11 @@ def _env_report():
         notes.append("缺少 TOML 解析库（Python < 3.11 需 pip install tomli）")
     return {
         "docker": docker,
-        "pier": {"available": bool(binary), "path": binary, "version": version},
-        "egress": egress,
-        "toml": _toml is not None,
+        "pier": dict(static["pier"]),
+        "egress": dict(egress),
+        "toml": static["toml"],
         "notes": notes,
-        "ok": bool(binary and docker["ok"] and _toml is not None),
+        "ok": bool(binary and docker["ok"] and static["toml"]),
     }
 
 
@@ -356,18 +418,8 @@ MODEL_FREE_AGENTS = ("oracle", "nop")
 ENDPOINT_SUFFIXES = ("/chat/completions", "/completions", "/responses")
 
 
-def _int(value, default=0):
-    try:
-        return int(float(value))
-    except (TypeError, ValueError):
-        return default
-
-
-def _opt_float(value):
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
+_int = utils.int_or
+_opt_float = utils.float_or_none
 
 
 def _num_text(value, default):
