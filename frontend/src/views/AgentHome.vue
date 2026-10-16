@@ -237,7 +237,7 @@ onUnmounted(() => timer && clearInterval(timer))
           <label>任务集</label>
           <select v-model="form.data" @change="loadTasks">
             <option v-for="d in datasets" :key="d.name" :value="(d.agent || {}).tasks_dir">
-              {{ d.title }}（{{ (d.agent || {}).tasks || '—' }}）
+              {{ d.title }}（{{ (d.agent || {}).tasks_text || '—' }}）
             </option>
           </select>
           <span v-if="selectedDataset && selectedDataset.note" class="tip">

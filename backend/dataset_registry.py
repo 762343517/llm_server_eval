@@ -80,18 +80,26 @@ def _norm_reader(raw, files):
 def _norm_agent(spec):
     """Agent 任务集描述（配置里的 agent 段）；不是 agent 数据集时返回 None。
 
-    这类数据集的「题目」不是一道道问答题，而是 tasks/ 下的任务目录（每个任务自带
-    task.toml、环境 Dockerfile 与测试脚本），由 Agent 评测页交给外部沙箱框架逐任务
-    执行判定，因此与 reader/fields 无关。
+    这类数据集的「题目」不是一道道问答题，而是任务目录（每个任务自带 task.toml、
+    环境 Dockerfile 与测试脚本），由 Agent 评测页交给外部沙箱框架逐任务执行判定，
+    因此与 reader/fields 无关。
+
+    tasks 是相对数据集目录的路径；留空或写 "." 表示「任务目录就是数据集根目录」
+    （如 terminal-bench-2.0：任务目录直接放在数据集目录下，没有多余的 tasks/ 层）。
     """
     raw = spec.get("agent")
     if not isinstance(raw, dict):
         return None
     tasks = str(raw.get("tasks") or "").strip()
+    root = dataset_dir(spec)
+    at_root = tasks in ("", ".", "./")
     return {
         "framework": str(raw.get("framework") or "pier").strip() or "pier",
-        "tasks_dir": os.path.join(dataset_dir(spec), tasks) if tasks else "",
+        # normpath 抹掉 "dataset/xxx/." 里的尾随点，路径比较/展示才干净
+        "tasks_dir": root if at_root else os.path.normpath(os.path.join(root, tasks)),
         "tasks": tasks,
+        # 下拉框展示用：任务在数据集根目录时给个明确的说法，避免显示 "."
+        "tasks_text": "数据集根目录" if at_root else tasks,
     }
 
 

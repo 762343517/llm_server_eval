@@ -45,6 +45,17 @@
         "framework": "pier",
         "tasks": "tasks"
       }
+    },
+    {
+      "name": "terminal-bench-2.0",
+      "title": "Terminal-Bench 2.0",
+      "file": "*/task.toml",
+      "runnable": false,
+      "note": "终端 Agent 任务集：89 个任务直接放在数据集根目录（每个任务自带 task.toml / environment / tests），在「Agent 评测」页发起（pier + docker 逐任务沙箱判定），不走单轮作答 + 裁判判分流程",
+      "agent": {
+        "framework": "pier",
+        "tasks": "."
+      }
     }
   ]
 }

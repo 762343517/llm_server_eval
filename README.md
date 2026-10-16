@@ -112,11 +112,16 @@ python3 backend/simpleqa_eval.py --data dataset/HLE/test-00000-of-00001.parquet 
 | SimpleQA-Verified | `dataset/SimpleQA-Verified/` | `csv` | 原列名（`original_index/problem/answer/topic/answer_type`） |
 | HLE (Humanity's Last Exam) | `dataset/HLE/` | `hle` | `question→problem`、`category→topic`、`raw_subject→subject`、`answer_type` 原样 |
 | DeepSWE | `dataset/deepswe/` | `parquet` | `problem_statement→problem`、`category→topic`、`language→subject`；`runnable=false`（SWE 类编码 agent 任务，需 docker 执行环境与测试用例验证，不能用本页的单轮作答 + 裁判判分流程评测） |
+| Terminal-Bench 2.0 | `dataset/terminal-bench-2.0/` | 不适用 | 终端 agent 任务集（89 个任务）：`agent.framework=pier` + `agent.tasks="."`，任务目录直接位于数据集根目录，每个任务自带 `task.toml` / `environment/` / `tests/`；`runnable=false`（在「Agent 评测」页发起，由 pier 拉起 docker 沙箱逐任务执行并跑任务自带测试脚本判定） |
 
 页面的数据集下拉框即来自该清单：数据文件缺失或 `runnable=false` 的条目标注原因并禁止选择；
 「自定义数据集路径」输入框可绕过配置直接跑任意 `.csv` / `.parquet`（按扩展名推断 reader）。
 清单读取带缓存（配置文件与各数据集目录的 mtime 变化时自动重建），新增数据集后刷新页面即可
 看到；CLI 的 `--data` 默认取配置里的 `default`。
+
+配置里的 `agent` 段标记「Agent 任务集」（DeepSWE、Terminal-Bench 2.0）：`tasks` 是任务目录相对
+数据集目录的路径，留空或写 `"."` 表示任务目录就是数据集根目录（下拉框显示为「数据集根目录」）；
+这类数据集由「Agent 评测」页交给 pier 拉起 docker 沙箱逐任务执行，`reader` / `fields` 不参与。
 
 题型（`exactMatch` / `multipleChoice`）仅影响问题文本，打分模板一致。HLE 带图题目（342 题）
 以 OpenAI 多模态格式发送（`image_url` + base64 data-url），图片不写入逐题记录，
