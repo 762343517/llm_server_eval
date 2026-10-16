@@ -25,6 +25,7 @@ sys.path.insert(0, BASE_DIR)
 import appconfig      # noqa: E402
 import consts         # noqa: E402
 import csvview        # noqa: E402
+import dataset_registry   # noqa: E402
 import eval_core      # noqa: E402
 import perf_core      # noqa: E402
 import perf_manager   # noqa: E402
@@ -108,11 +109,10 @@ def queue_state():
 # ---------------------------------------------------------------- 元信息
 @app.get("/api/meta")
 def api_meta():
-    datasets = eval_core.available_datasets()
-    for d in datasets:
-        d["is_csv"] = d["path"].lower().endswith(".csv")
+    # 数据集清单来自 dataset/datasets.json（每个数据集以名称作为顶级目录放在 dataset/ 下）
+    datasets = dataset_registry.datasets()
     defaults = appconfig.accuracy_defaults()
-    # 上次使用的路径不在内置数据集列表中时，回填到「自定义数据集路径」
+    # 上次使用的路径不在配置的数据集列表里时，回填到「自定义数据集路径」
     known = {d["path"] for d in datasets}
     custom_data = "" if defaults["data"] in known else defaults["data"]
     return JSONResponse({
@@ -121,11 +121,13 @@ def api_meta():
             "defaults": defaults,
             "custom_data": custom_data,
             "datasets": datasets,
+            "dataset_dir": consts.DATASET_DIR,
             "thinking_options": appconfig.THINKING_OPTIONS,
             "effort_options": appconfig.EFFORT_OPTIONS,
             "saved_cfg_at": _mtime(os.path.join(run_manager.RUNS_DIR,
                                                 appconfig.LAST_CFG_NAME)),
-            "has_data": any(d["exists"] for d in datasets),
+            # 只有「数据文件存在且可用当前流程评测」的数据集才允许启动
+            "has_data": any(d["exists"] and d["runnable"] for d in datasets),
         },
         "stress": {
             "defaults": appconfig.stress_defaults(),
@@ -176,6 +178,12 @@ def _accuracy_cfg(payload):
     judge_api_key = judge_api_key_raw or api_key
     if not os.path.exists(data):
         raise HTTPException(400, "数据集不存在: {}".format(data))
+    # 配置里标记 runnable=false 的数据集（如 SWE 类 agent 任务）不能走单轮作答 + 裁判判分
+    spec = dataset_registry.find(data)
+    if spec and not spec["runnable"]:
+        raise HTTPException(400, "数据集 {} 无法用当前流程评测：{}".format(
+            spec["title"] or spec["name"],
+            spec["note"] or "缺少判分所需的答案字段"))
     max_tokens = _int(payload.get("max_tokens"), consts.DEFAULT_MAX_TOKENS)
     max_tokens_cap = max(_int(payload.get("max_tokens_cap"),
                               consts.DEFAULT_MAX_TOKENS_CAP), max_tokens)

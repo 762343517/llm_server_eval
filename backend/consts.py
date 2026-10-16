@@ -16,6 +16,9 @@ import os
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MODEL_DIR = os.path.join(PROJECT_ROOT, "model")
 
+# 数据集根目录：每个数据集以「名称」为顶级目录放在这里，清单见 dataset/datasets.json
+DATASET_DIR = os.path.join(PROJECT_ROOT, "dataset")
+
 # ---------------------------------------------------------------- 精度测试
 # 被测模型：完整的 chat/completions 地址
 DEFAULT_ENDPOINT = "http://10.174.0.70:34000/v1/chat/completions"

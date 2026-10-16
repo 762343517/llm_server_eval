@@ -1,0 +1,46 @@
+{
+  "version": 1,
+  "default": "SimpleQA-Verified",
+  "datasets": [
+    {
+      "name": "SimpleQA-Verified",
+      "title": "SimpleQA-Verified",
+      "reader": "csv",
+      "file": "simpleqa_verified.csv",
+      "fields": {
+        "problem": "problem",
+        "answer": "answer",
+        "topic": "topic",
+        "answer_type": "answer_type",
+        "subject": "subject"
+      }
+    },
+    {
+      "name": "HLE",
+      "title": "HLE (Humanity's Last Exam)",
+      "reader": "hle",
+      "file": "*.parquet",
+      "fields": {
+        "problem": "question",
+        "answer": "answer",
+        "topic": "category",
+        "answer_type": "answer_type",
+        "subject": "raw_subject",
+        "image": "image"
+      }
+    },
+    {
+      "name": "deepswe",
+      "title": "DeepSWE",
+      "reader": "parquet",
+      "file": "data/*.parquet",
+      "fields": {
+        "problem": "problem_statement",
+        "topic": "category",
+        "subject": "language"
+      },
+      "runnable": false,
+      "note": "SWE 类编码 agent 任务（problem_statement + 测试用例验证，需 docker 执行环境），不能用本页的单轮作答 + 裁判判分流程评测，仅作为数据集登记"
+    }
+  ]
+}

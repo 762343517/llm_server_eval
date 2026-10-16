@@ -2,7 +2,8 @@
 
 面向本地部署的大模型服务，前端 Vue3 + 后端 FastAPI 前后端分离，包含两个 Tab：
 
-- **精度测试**：SimpleQA-Verified / HLE 数据集逐题作答 → LLM 裁判判分 → 汇总 Pass@1；
+- **精度测试**：逐题作答 → LLM 裁判判分 → 汇总 Pass@1（数据集清单由 `dataset/datasets.json`
+  配置、页面下拉选择，见「数据集配置」）；
 - **压力测试**：调用 [EvalScope](https://evalscope.readthedocs.io/) 的 `evalscope perf`
   并发压测，实时展示吞吐、首字延迟、端到端延迟、阶梯并发对比与多轮上下文增长指标。
 
@@ -15,14 +16,15 @@ zhipuEval
 │   ├── consts.py          # 端点/API Key 等连接默认值
 │   ├── appconfig.py       # 表单默认值与「上次配置」持久化
 │   ├── run_manager.py     # 精度测试任务管理（状态/进度/导出）
-│   ├── eval_core.py       # 数据集解析、生成、裁判、汇总
+│   ├── dataset_registry.py # 数据集清单（dataset/datasets.json）读取与字段映射
+│   ├── eval_core.py       # 数据集加载、生成、裁判、汇总
 │   ├── simpleqa_eval.py   # 精度测试命令行入口
 │   ├── perf_core.py       # EvalScope 集成：数据集生成、命令行构造、结果解析、指标聚合
 │   ├── perf_manager.py    # 压测任务管理（子进程/实时进度/导出）
 │   ├── csvview.py         # CSV 预览
 │   └── webui/             # 前端构建产物（Vite 生成，FastAPI 托管）
 ├── frontend/src/{views,components}   # Vue3 + Vite 前端源码
-├── dataset/               # 数据集
+├── dataset/               # 数据集：每个数据集一个顶级目录（数据不入库，仅 datasets.json 入库）
 ├── runs/                  # 运行数据（不入版本库）
 │   ├── <run_id>/          # 精度测试：meta.json / items.jsonl / results.csv
 │   └── stress/<run_id>/   # 压测：meta / dataset / args / proc.json / perf/
@@ -67,15 +69,56 @@ python3 backend/simpleqa_eval.py --data dataset/HLE/test-00000-of-00001.parquet 
 - `GET /api/queue` 返回队列快照（正在运行的任务 + 排队列表），两个任务列表上方展示概览；
 - 队列只存在于内存：服务重启后排队中的任务不会恢复执行，启动时统一收敛为 `已中断`。
 
-## 支持的数据集
+## 数据集配置
 
-| 数据集 | 文件 | 格式 | 字段映射 |
+数据集清单、数据文件位置与字段映射全部写在 `dataset/datasets.json` 里（该文件入库；
+`dataset/` 下的数据集目录与数据文件都在 `.gitignore` 里，只保留在本机），新增数据集
+**不需要改代码**，只需两步：
+
+1. 把数据集目录拷进 `dataset/`，**以数据集名称作为顶级目录名**（数据文件放在该目录内，
+   可再分子目录）；
+2. 在 `dataset/datasets.json` 的 `datasets` 里加一条：
+
+```json
+{
+  "name": "MyDataset",
+  "title": "我的数据集",
+  "reader": "parquet",
+  "file": "data/*.parquet",
+  "fields": {"problem": "question", "answer": "answer",
+             "topic": "category", "subject": "raw_subject"}
+}
+```
+
+字段说明：`name` 为顶级目录名（即数据集名称）；`title` 是下拉框显示名（缺省用 `name`）；
+`reader` 取 `csv` / `parquet` / `hle`，缺省按文件扩展名推断；`file` 是数据集目录内的数据
+文件，支持 `*` 通配（多分片自动拼接）；`fields` 是「统一字段 → 源列名」映射，未声明的字段
+按同名列读取，列不存在时填空值；此外可用 `runnable: false` + `note` 标记「不适合当前
+流程」的数据集，页面会展示原因并禁止选择。
+
+统一字段为 `problem / answer / topic / answer_type / subject / image`，各数据集经映射归一
+化后进入同一条流水线（生成 → LLM 裁判 → 汇总）：
+
+| reader | 适用 | 说明 |
+| --- | --- | --- |
+| `csv` | 表格类数据集 | 多分片 CSV 按文件名顺序拼接 |
+| `parquet` | 通用 parquet | 多分片交由 pandas 拼接（图片列原样透传） |
+| `hle` | HLE 专用 | 按 row group 只读采样命中行的 `image` 列，整表含 base64 图片时快很多 |
+
+当前已登记的数据集：
+
+| 数据集 | 目录 | reader | 字段映射 |
 | --- | --- | --- | --- |
-| SimpleQA-Verified | `dataset/SimpleQA-Verified/simpleqa_verified.csv` | CSV | 原字段 `original_index/problem/answer/topic/answer_type` |
-| HLE (Humanity's Last Exam) | `dataset/HLE/*.parquet` | parquet | `question→problem`、`category→topic`、`raw_subject→subject`、`answer_type` 原样 |
+| SimpleQA-Verified | `dataset/SimpleQA-Verified/` | `csv` | 原列名（`original_index/problem/answer/topic/answer_type`） |
+| HLE (Humanity's Last Exam) | `dataset/HLE/` | `hle` | `question→problem`、`category→topic`、`raw_subject→subject`、`answer_type` 原样 |
+| DeepSWE | `dataset/deepswe/` | `parquet` | `problem_statement→problem`、`category→topic`、`language→subject`；`runnable=false`（SWE 类编码 agent 任务，需 docker 执行环境与测试用例验证，不能用本页的单轮作答 + 裁判判分流程评测） |
 
-两类数据统一为同一套字段后进入同一条流水线（生成 → LLM 裁判 → 汇总）；题型
-（`exactMatch` / `multipleChoice`）仅影响问题文本，打分模板一致。HLE 带图题目（342 题）
+页面的数据集下拉框即来自该清单：数据文件缺失或 `runnable=false` 的条目标注原因并禁止选择；
+「自定义数据集路径」输入框可绕过配置直接跑任意 `.csv` / `.parquet`（按扩展名推断 reader）。
+清单读取带缓存（配置文件与各数据集目录的 mtime 变化时自动重建），新增数据集后刷新页面即可
+看到；CLI 的 `--data` 默认取配置里的 `default`。
+
+题型（`exactMatch` / `multipleChoice`）仅影响问题文本，打分模板一致。HLE 带图题目（342 题）
 以 OpenAI 多模态格式发送（`image_url` + base64 data-url），图片不写入逐题记录，
 仅记录 `has_image` 标记。
 

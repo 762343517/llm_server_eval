@@ -8,6 +8,7 @@ import json
 import os
 
 import consts
+import dataset_registry
 import eval_core
 import perf_core
 import run_manager
@@ -69,7 +70,8 @@ def accuracy_defaults():
         "judge_api_key": consts.DEFAULT_JUDGE_API_KEY,
         "model": consts.DEFAULT_MODEL,
         "judge_model": consts.DEFAULT_JUDGE_MODEL,
-        "data": eval_core.DEFAULT_DATA,
+        # 数据集来自固定的 dataset/ 目录，默认取 dataset/datasets.json 配置里的 default
+        "data": dataset_registry.default_path() or eval_core.DEFAULT_DATA,
         "thinking": consts.DEFAULT_THINKING,
         "reasoning_effort": consts.DEFAULT_REASONING_EFFORT,
         "judge_thinking": consts.DEFAULT_THINKING,
@@ -86,7 +88,18 @@ def accuracy_defaults():
     for k, v in saved.items():
         if k in d and v is not None:
             d[k] = v
+    # 历史配置里的数据集可能已被删除/改名，这里静默回落到配置指定的默认数据集
+    d["data"] = _valid_dataset(d["data"])
     return d
+
+
+def _valid_dataset(path):
+    """数据集路径存在则保留（页面上也允许自定义路径），否则回落到配置里的默认数据集。"""
+    path = str(path or "").strip()
+    if path and os.path.exists(path):
+        # 历史配置里可能存的是相对路径，统一规范化为绝对路径以便与下拉框候选匹配
+        return os.path.abspath(path)
+    return dataset_registry.default_path() or eval_core.DEFAULT_DATA
 
 
 def _legacy_iterations(saved):

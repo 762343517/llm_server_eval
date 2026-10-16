@@ -112,8 +112,9 @@ def main():
                     help="裁判模型端点；留空则复用 --endpoint")
     ap.add_argument("--judge-api-key", default=consts.DEFAULT_JUDGE_API_KEY,
                     help="裁判模型密钥；留空则复用 --api-key")
-    ap.add_argument("--data", default=eval_core.DEFAULT_DATA,
-                    help="数据集路径：.csv 按 SimpleQA 结构，.parquet 按 HLE 结构")
+    ap.add_argument("--data", default=eval_core.default_data_path(),
+                    help="数据集路径：默认取 dataset/datasets.json 的 default；已登记的数据集"
+                         "按其 reader/fields 解析，其它路径按扩展名推断（.csv / .parquet）")
     ap.add_argument("--thinking", dest="thinking", action="store_const",
                     const="enabled", default=consts.DEFAULT_THINKING,
                     help="被测模型开启思考（默认不传该字段，由服务端决定）")

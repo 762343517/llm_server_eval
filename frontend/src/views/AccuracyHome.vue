@@ -18,6 +18,16 @@ const busyId = ref('')
 let timer = null
 
 const datasets = computed(() => (store.meta && store.meta.accuracy.datasets) || [])
+const datasetDir = computed(() => (store.meta && store.meta.accuracy.dataset_dir) || '')
+// 下拉框选中的数据集条目：用于展示说明/缺失提示，并决定能否预览 CSV
+const currentDataset = computed(
+  () => datasets.value.find((d) => d.path === form.data) || null,
+)
+const previewPath = computed(() => form.data_custom || form.data || '')
+const canPreviewCsv = computed(() => {
+  if (form.data_custom) return form.data_custom.toLowerCase().endsWith('.csv')
+  return !!(currentDataset.value && currentDataset.value.reader === 'csv')
+})
 const thinkingOptions = computed(() => (store.meta && store.meta.accuracy.thinking_options) || [])
 const effortOptions = computed(() => (store.meta && store.meta.accuracy.effort_options) || [])
 const savedAt = computed(() => {
@@ -146,7 +156,7 @@ onUnmounted(() => timer && clearInterval(timer))
   <div class="page-head">
     <div>
       <h1>精度测试</h1>
-      <div class="sub">SimpleQA-Verified 数据集逐题作答 + 裁判模型判分，统计 pass@1</div>
+      <div class="sub">数据集逐题作答 + 裁判模型判分，统计 pass@1（数据集由 dataset/datasets.json 配置）</div>
     </div>
     <div class="actions">
       <button class="btn" :disabled="refreshing" @click="loadAll(true)">刷新配置</button>
@@ -155,7 +165,7 @@ onUnmounted(() => timer && clearInterval(timer))
 
   <div v-if="error" class="alert bad">{{ error }}</div>
   <div v-if="store.meta && !store.meta.accuracy.has_data" class="alert warn">
-    没有找到可用的数据集文件，请确认 .csv 数据集存在后再启动。
+    没有找到可用的数据集：请确认 dataset/datasets.json 里已登记数据集，且数据文件真实存在。
   </div>
 
   <section class="card">
@@ -196,22 +206,38 @@ onUnmounted(() => timer && clearInterval(timer))
     <Card title="数据集" nested>
     <div class="grid wide">
       <div class="field">
-        <label>内置数据集</label>
+        <label>数据集</label>
         <select v-model="form.data">
-          <option v-for="d in datasets" :key="d.path" :value="d.path">
-            {{ d.path }}{{ d.exists ? '' : '（文件缺失）' }}
+          <option
+            v-for="d in datasets"
+            :key="d.path"
+            :value="d.path"
+            :disabled="!d.runnable"
+          >
+            {{ d.title }}{{ d.exists ? '' : '（数据文件缺失）' }}{{ d.runnable ? '' : '（暂不支持本流程）' }}
           </option>
         </select>
+        <span v-if="!datasets.length" class="tip">
+          还没有配置数据集：把数据集目录放进 {{ datasetDir || 'dataset/' }}（目录名即数据集名称），
+          再在 dataset/datasets.json 里登记一条即可
+        </span>
+        <span v-else-if="currentDataset && !currentDataset.exists" class="tip">
+          数据文件不存在，请检查 {{ currentDataset.dir }}
+        </span>
+        <span v-else-if="currentDataset && currentDataset.note" class="tip">
+          {{ currentDataset.note }}
+        </span>
+        <span v-else class="tip">
+          数据集以名称作为顶级目录放在 {{ datasetDir || 'dataset/' }}，清单与字段映射见
+          dataset/datasets.json，新增数据集无需改代码
+        </span>
       </div>
       <div class="field">
-        <label>自定义数据集路径（优先于内置选择）</label>
-        <input v-model.trim="form.data_custom" type="text" placeholder="留空则用上面的内置数据集" />
+        <label>自定义数据集路径（优先于上面的选择）</label>
+        <input v-model.trim="form.data_custom" type="text" placeholder="留空则用上面选择的数据集" />
         <span class="tip">
-          支持工作区内的 .csv 或 .jsonl 路径 ·
-          <RouterLink
-            v-if="(form.data_custom || form.data).toLowerCase().endsWith('.csv')"
-            :to="`/csv?path=${encodeURIComponent(form.data_custom || form.data)}`"
-          >
+          支持工作区内的 .csv / parquet 路径（未在配置里登记也能直接跑）·
+          <RouterLink v-if="canPreviewCsv" :to="`/csv?path=${encodeURIComponent(previewPath)}`">
             预览 CSV
           </RouterLink>
         </span>
