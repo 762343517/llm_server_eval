@@ -77,6 +77,24 @@ def _norm_reader(raw, files):
     return "csv" if any(f.lower().endswith(".csv") for f in files) else "parquet"
 
 
+def _norm_agent(spec):
+    """Agent 任务集描述（配置里的 agent 段）；不是 agent 数据集时返回 None。
+
+    这类数据集的「题目」不是一道道问答题，而是 tasks/ 下的任务目录（每个任务自带
+    task.toml、环境 Dockerfile 与测试脚本），由 Agent 评测页交给外部沙箱框架逐任务
+    执行判定，因此与 reader/fields 无关。
+    """
+    raw = spec.get("agent")
+    if not isinstance(raw, dict):
+        return None
+    tasks = str(raw.get("tasks") or "").strip()
+    return {
+        "framework": str(raw.get("framework") or "pier").strip() or "pier",
+        "tasks_dir": os.path.join(dataset_dir(spec), tasks) if tasks else "",
+        "tasks": tasks,
+    }
+
+
 def _build_state():
     cfg = _load_config()
     raw_items = cfg.get("datasets")
@@ -104,6 +122,8 @@ def _build_state():
             # runnable=false 表示该数据集不适合当前「单轮作答 + 裁判判分」流程
             "runnable": spec.get("runnable") is not False,
             "note": str(spec.get("note") or "").strip(),
+            # agent 段：该数据集是 Agent 任务集（如 DeepSWE）时为 dict，否则为 None
+            "agent": _norm_agent(spec),
             "exists": bool(files) and os.path.isdir(directory),
         })
     return {"default": str(cfg.get("default") or "").strip(), "entries": entries}

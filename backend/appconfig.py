@@ -31,6 +31,7 @@ EFFORT_OPTIONS = [(v, EFFORT_LABELS[v]) for v in eval_core.EFFORT_CHOICES]
 
 LAST_CFG_NAME = ".last_config.json"
 LAST_STRESS_CFG_NAME = ".last_stress_config.json"
+LAST_AGENT_CFG_NAME = ".last_agent_config.json"
 
 
 def _last_cfg_path(name):
@@ -100,6 +101,47 @@ def _valid_dataset(path):
         # 历史配置里可能存的是相对路径，统一规范化为绝对路径以便与下拉框候选匹配
         return os.path.abspath(path)
     return dataset_registry.default_path() or eval_core.DEFAULT_DATA
+
+
+def _default_agent_data():
+    """Agent 任务集目录：取配置里第一个声明了 agent 段的数据集。"""
+    for item in dataset_registry.datasets():
+        tasks_dir = (item.get("agent") or {}).get("tasks_dir")
+        if tasks_dir:
+            return tasks_dir
+    return ""
+
+
+def _valid_agent_data(path):
+    """历史配置里的任务集可能已被删除/改名，这里静默回落到默认任务集。"""
+    path = str(path or "").strip()
+    if path and os.path.isdir(path):
+        return os.path.abspath(path)
+    return _default_agent_data()
+
+
+def agent_defaults():
+    """Agent 评测表单默认值：静态默认 + 上次提交的配置。"""
+    d = {
+        "endpoint": consts.DEFAULT_AGENT_ENDPOINT,
+        "api_key": consts.DEFAULT_AGENT_API_KEY,
+        "model": consts.DEFAULT_AGENT_MODEL,
+        "model_class": consts.DEFAULT_AGENT_MODEL_CLASS,
+        "agent": consts.DEFAULT_AGENT_NAME,
+        # 任务集来自 dataset/<数据集名称>/tasks，默认取配置中声明 agent 段的数据集
+        "data": _default_agent_data(),
+        "limit": consts.DEFAULT_AGENT_N_TASKS,
+        "concurrency": consts.DEFAULT_AGENT_CONCURRENCY,
+        "seed": consts.DEFAULT_AGENT_SEED,
+        "timeout_multiplier": consts.DEFAULT_AGENT_TIMEOUT_MULTIPLIER,
+        "verifier_timeout_multiplier": consts.DEFAULT_AGENT_VERIFIER_TIMEOUT_MULTIPLIER,
+    }
+    saved = load_last_cfg(LAST_AGENT_CFG_NAME)
+    for k, v in saved.items():
+        if k in d and v is not None:
+            d[k] = v
+    d["data"] = _valid_agent_data(d["data"])
+    return d
 
 
 def _legacy_iterations(saved):

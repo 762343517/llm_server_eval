@@ -64,6 +64,23 @@ DEFAULT_STRESS_ITERATIONS = 3
 DEFAULT_STRESS_RAMP_LEVELS_TEXT = "2, 4, 8, 16"
 DEFAULT_STRESS_RAMP_PAUSE_SECONDS = 10
 
+# ------------------------------------------------------------ Agent 评测（DeepSWE）
+# 用 pier 在独立容器里跑 SWE 类编码 agent 任务（解题 → 应用测试补丁 → 判定 reward）
+DEFAULT_AGENT_ENDPOINT = DEFAULT_ENDPOINT
+DEFAULT_AGENT_API_KEY = DEFAULT_API_KEY
+DEFAULT_AGENT_MODEL = DEFAULT_MODEL
+DEFAULT_AGENT_NAME = "mini-swe-agent"
+# mini-swe-agent 对 openai/ 前缀的模型默认走 Responses API，本仓库的服务只提供
+# chat/completions，因此固定用 litellm 通道（可通过表单覆盖）
+DEFAULT_AGENT_MODEL_CLASS = "litellm"
+# 单个任务的镜像约数 GB、agent 超时以小时计，因此默认只抽样 1 个任务
+DEFAULT_AGENT_N_TASKS = 1
+DEFAULT_AGENT_CONCURRENCY = 2
+DEFAULT_AGENT_SEED = 0
+DEFAULT_AGENT_TIMEOUT_MULTIPLIER = 1.0
+DEFAULT_AGENT_VERIFIER_TIMEOUT_MULTIPLIER = 1.0
+DEFAULT_AGENT_POLL_SECONDS = 3.0      # 轮询 pier 结果文件的间隔
+
 # 请求模式：chat = 自定义会话提问；long = 长序列 + 固定前缀（Prefix Cache 命中率）
 DEFAULT_STRESS_PROMPT_MODE = "chat"
 # 长序列模式：分词器路径（evalscope 的 random 数据集按 token 精确生成，必需）

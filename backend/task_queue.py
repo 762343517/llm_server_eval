@@ -17,7 +17,8 @@ import os
 import threading
 import time
 
-KIND_TEXT = {"accuracy": "精度测试", "stress": "压力测试"}
+KIND_TEXT = {"accuracy": "精度测试", "stress": "压力测试",
+             "agent": "Agent 评测"}
 
 # 相邻任务之间的静默间隔（秒）：给被测服务留出释放连接/显存的时间
 SETTLE_SECONDS = 5.0

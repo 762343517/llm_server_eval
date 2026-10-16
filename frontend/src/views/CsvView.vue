@@ -5,6 +5,7 @@ import { api } from '../api'
 import { Card, CsvTable } from '../components/index.js'
 
 // source: workspace（工作区文件）| accuracy（评测逐题 CSV）| stress（压测逐请求 CSV）
+//         | agent（Agent 评测逐任务 CSV）
 const props = defineProps({
   source: { type: String, default: 'workspace' },
   id: { type: String, default: '' },
@@ -23,11 +24,13 @@ const title = computed(() =>
 const backTo = computed(() => {
   if (props.source === 'accuracy') return `/accuracy/${props.id}`
   if (props.source === 'stress') return `/stress/${props.id}`
+  if (props.source === 'agent') return `/agent/${props.id}`
   return '/accuracy'
 })
 const downloadUrl = computed(() => {
   if (props.source === 'accuracy') return `/api/accuracy/runs/${props.id}/download.csv`
   if (props.source === 'stress') return `/api/stress/runs/${props.id}/download.csv`
+  if (props.source === 'agent') return `/api/agent/runs/${props.id}/download.csv`
   return api.csvDownload(props.path)
 })
 
@@ -37,6 +40,7 @@ const load = async () => {
   try {
     if (props.source === 'accuracy') data.value = await api.accuracyCsv(props.id, limit.value)
     else if (props.source === 'stress') data.value = await api.stressCsv(props.id, limit.value)
+    else if (props.source === 'agent') data.value = await api.agentCsv(props.id, limit.value)
     else data.value = await api.csv(props.path, limit.value)
   } catch (e) {
     error.value = e.message
@@ -74,7 +78,7 @@ watch(() => [props.path, props.id, props.source], load)
       :data="data"
       :loading="loading"
       :error="error"
-      :fixed="source === 'accuracy'"
+      :fixed="source === 'accuracy' || source === 'agent'"
       @update:limit="setLimit"
     />
   </Card>

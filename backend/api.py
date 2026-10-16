@@ -1,11 +1,13 @@
-"""FastAPI 后端：精度测试 + 压力测试的统一 JSON 接口，并托管 Vue 前端产物。
+"""FastAPI 后端：精度测试 + 压力测试 + Agent 评测的统一 JSON 接口，并托管 Vue 前端产物。
 
 路由约定：
-  /api/meta                 应用元信息（表单默认值、选项、evalscope 状态）
+  /api/meta                 应用元信息（表单默认值、选项、evalscope/pier 状态）
   /api/accuracy/*           精度测试：任务列表 / 启动 / 详情 / 逐题 / 停止 / 删除 / CSV
   /api/stress/*             压力测试：任务列表 / 启动 / 保存配置 / 详情 / 明细 / 停止 /
                             删除 / CSV / 原始产物（benchmark.log、performance_summary.txt、
                             perf_report.html）
+  /api/agent/*              Agent 评测：环境自检 / 任务清单 / 启动 / 详情 / 逐任务 /
+                            停止 / 删除 / CSV / 产物（测试输出、模型补丁）
   /api/csv                  工作区内 CSV 文件预览
 其余路径交给 SPA（产物在 backend/webui/），未命中的静态文件回落到 index.html。
 """
@@ -22,6 +24,7 @@ from fastapi.staticfiles import StaticFiles
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, BASE_DIR)
 
+import agent_core     # noqa: E402
 import appconfig      # noqa: E402
 import consts         # noqa: E402
 import csvview        # noqa: E402
@@ -36,6 +39,12 @@ WEBUI_DIR = os.path.join(BASE_DIR, "webui")
 
 accuracy = run_manager.RunManager()
 stress = perf_manager.StressManager()
+# Agent 评测单独占用 runs/agent/，避免与精度测试的任务列表互相混入
+AGENT_SUBDIR = "agent"
+agent = run_manager.RunManager(
+    runs_dir=os.path.abspath(os.path.join(run_manager.RUNS_DIR, AGENT_SUBDIR)),
+    kind="agent", worker=agent_core.run_agent_eval,
+    csv_columns=run_manager.AGENT_CSV_COLUMNS)
 
 
 @asynccontextmanager
@@ -137,6 +146,17 @@ def api_meta():
             "tokenizers": perf_core.list_tokenizers(),
             "saved_cfg_at": _mtime(os.path.join(run_manager.RUNS_DIR,
                                                 appconfig.LAST_STRESS_CFG_NAME)),
+        },
+        "agent": {
+            "defaults": appconfig.agent_defaults(),
+            # 能跑 Agent 评测的数据集（datasets.json 里声明了 agent 段）
+            "datasets": [d for d in datasets if d.get("agent")],
+            "agent_choices": list(agent_core.AGENT_CHOICES),
+            "framework": agent_core.FRAMEWORK,
+            # 环境自检：docker / pier / egress 端口适配
+            "env": agent_core.env_report(),
+            "saved_cfg_at": _mtime(os.path.join(run_manager.RUNS_DIR,
+                                                appconfig.LAST_AGENT_CFG_NAME)),
         },
         "csv": {"default_limit": csvview.CSV_DEFAULT_LIMIT,
                 "max_limit": csvview.CSV_MAX_LIMIT},
@@ -604,6 +624,199 @@ def stress_download_csv(run_id: str):
                         filename="stress_{}.csv".format(run_id))
 
 
+# ---------------------------------------------------------------- Agent 评测
+def _decorate_agent(runs):
+    """为 Agent 任务列表补充前端渲染所需的派生字段。"""
+    for r in runs:
+        r["status_text"] = ACC_STATUS_TEXT.get(r.get("status"), r.get("status"))
+        r["queue_position"] = task_queue.QUEUE.position(r.get("run_id"))
+        s = r.get("summary") or {}
+        r["pass_at_1"] = s.get("pass_at_1")
+        r["n_done"] = s.get("num_records")
+        r["expected"] = s.get("num_tasks")
+        prog = r.get("progress") or {}
+        r["stage"] = prog.get("stage", "")
+        r["pct"] = prog.get("pct", 0.0)
+    return runs
+
+
+def _agent_cfg(payload):
+    """校验并归一化 Agent 评测配置。"""
+    data = ((payload.get("data_custom") or "").strip()
+            or (payload.get("data") or "").strip())
+    if not data:
+        raise HTTPException(400, "请选择 Agent 任务集")
+    directory = agent_core.resolve_tasks_dir(data)
+    if not directory or not os.path.isdir(directory):
+        raise HTTPException(400, "任务集目录不存在: {}".format(data))
+    catalogue = agent_core.list_tasks(directory)
+    if not catalogue:
+        raise HTTPException(400, "{} 下没有找到任务（任务目录需含 task.toml）".format(directory))
+    # 指定任务名时按名匹配；留空则按「任务数 + 抽样种子」取
+    wanted = payload.get("tasks") or ""
+    if isinstance(wanted, list):
+        wanted = ",".join(str(x) for x in wanted)
+    wanted = str(wanted).strip()
+    if wanted:
+        names = {t["name"] for t in catalogue}
+        missing = sorted({n.strip() for n in wanted.replace("\n", ",").split(",") if n.strip()}
+                         - names)
+        if missing:
+            raise HTTPException(400, "任务不存在: {}".format(", ".join(missing[:5])))
+    agent_name = (payload.get("agent") or "").strip() or consts.DEFAULT_AGENT_NAME
+    if agent_name not in agent_core.AGENT_CHOICES:
+        raise HTTPException(400, "Agent 取值非法: {}".format(agent_name))
+    endpoint = (payload.get("endpoint") or "").strip()
+    model = (payload.get("model") or "").strip()
+    # oracle / nop 是链路自检用的 agent，不调用模型，因此不校验模型配置
+    if agent_name not in agent_core.MODEL_FREE_AGENTS:
+        if not model:
+            raise HTTPException(400, "被测模型不能为空")
+        if not endpoint.startswith("http"):
+            raise HTTPException(400, "被测模型 API 端点必须以 http 开头")
+    timeout = _float(payload.get("timeout_multiplier"),
+                     consts.DEFAULT_AGENT_TIMEOUT_MULTIPLIER)
+    verifier_timeout = _float(payload.get("verifier_timeout_multiplier"),
+                              consts.DEFAULT_AGENT_VERIFIER_TIMEOUT_MULTIPLIER)
+    for label, value in (("任务超时倍数", timeout), ("判定超时倍数", verifier_timeout)):
+        if not 0.01 <= value <= 100:
+            raise HTTPException(400, "{}需在 0.01~100 之间".format(label))
+    cfg = {
+        "data": directory,
+        "agent": agent_name,
+        "endpoint": endpoint,
+        "api_key": (payload.get("api_key") or "").strip(),
+        "model": model,
+        "model_class": (payload.get("model_class") or "").strip(),
+        "tasks": wanted,
+        "limit": max(0, _int(payload.get("limit"), consts.DEFAULT_AGENT_N_TASKS)),
+        "concurrency": max(1, _int(payload.get("concurrency"),
+                                   consts.DEFAULT_AGENT_CONCURRENCY)),
+        "seed": _int(payload.get("seed"), consts.DEFAULT_AGENT_SEED),
+        "timeout_multiplier": timeout,
+        "verifier_timeout_multiplier": verifier_timeout,
+    }
+    saved = {k: cfg[k] for k in appconfig.agent_defaults() if k in cfg}
+    appconfig.save_last_cfg(appconfig.LAST_AGENT_CFG_NAME, saved)
+    return cfg
+
+
+@app.get("/api/agent/env")
+def agent_env():
+    """环境自检（页面顶部的就绪状态）。"""
+    return JSONResponse(agent_core.env_report(use_cache=False))
+
+
+@app.get("/api/agent/tasks")
+def agent_tasks(data: str = ""):
+    """任务集清单：每个任务的类别、语言、镜像及是否已在本机。"""
+    directory = agent_core.resolve_tasks_dir(data) or agent_core.tasks_dir()
+    if not directory or not os.path.isdir(directory):
+        raise HTTPException(404, "任务集目录不存在: {}".format(data or directory or "-"))
+    return JSONResponse({"directory": directory,
+                         "dataset": agent_core.tasks_label(directory),
+                         "tasks": agent_core.list_tasks(directory)})
+
+
+@app.get("/api/agent/runs")
+def agent_runs():
+    return JSONResponse({"runs": _decorate_agent(agent.list_runs())})
+
+
+@app.post("/api/agent/runs")
+def agent_start(payload: dict):
+    cfg = _agent_cfg(payload or {})
+    return JSONResponse({"run_id": agent.start(cfg)})
+
+
+@app.get("/api/agent/runs/{run_id}")
+def agent_status(run_id: str):
+    snap = agent.get(_valid_run_id(run_id))
+    if not snap:
+        raise HTTPException(404, "任务不存在")
+    snap["status_text"] = ACC_STATUS_TEXT.get(snap.get("status"), snap.get("status"))
+    snap["queue_position"] = task_queue.QUEUE.position(run_id)
+    prog = snap.get("progress") or {}
+    snap["stage"] = prog.get("stage", "")
+    snap["pct"] = prog.get("pct", 0.0)
+    return JSONResponse(snap)
+
+
+@app.get("/api/agent/runs/{run_id}/items")
+def agent_items(run_id: str, limit: int = 500, status: str = "", q: str = ""):
+    """逐任务结果（默认按完成顺序）。"""
+    rows = agent.read_items(_valid_run_id(run_id))
+    if status:
+        rows = [r for r in rows if r.get("status") == status]
+    if q:
+        needle = q.lower()
+        rows = [r for r in rows
+                if any(needle in str(r.get(key, "")).lower()
+                       for key in ("task", "title", "problem", "error"))]
+    return JSONResponse({"total": len(rows), "items": rows[:limit]})
+
+
+@app.post("/api/agent/runs/{run_id}/stop")
+def agent_stop(run_id: str):
+    if not agent.stop(_valid_run_id(run_id)):
+        raise HTTPException(404, "任务不存在或未在运行")
+    return JSONResponse({"ok": True})
+
+
+@app.delete("/api/agent/runs/{run_id}")
+def agent_delete(run_id: str):
+    if not agent.delete(_valid_run_id(run_id)):
+        raise HTTPException(404, "任务不存在")
+    return JSONResponse({"ok": True, "run_id": run_id})
+
+
+@app.get("/api/agent/runs/{run_id}/csv")
+def agent_csv(run_id: str, limit: int = csvview.CSV_DEFAULT_LIMIT):
+    """逐任务结果 CSV 预览。"""
+    if not agent.get(_valid_run_id(run_id)):
+        raise HTTPException(404, "任务不存在")
+    path, _ = agent.export_csv(run_id)
+    if not path:
+        raise HTTPException(404, "该任务暂无可导出的结果（逐任务记录为空）")
+    return JSONResponse(csvview.preview(path, limit, title="{} 结果".format(run_id)))
+
+
+@app.api_route("/api/agent/runs/{run_id}/download.csv", methods=["GET", "HEAD"])
+def agent_download_csv(run_id: str):
+    if not agent.get(_valid_run_id(run_id)):
+        raise HTTPException(404, "任务不存在")
+    path, _ = agent.export_csv(run_id)
+    if not path:
+        raise HTTPException(404, "暂无可导出的结果")
+    return FileResponse(path, media_type="text/csv",
+                        filename="agent_{}.csv".format(run_id))
+
+
+@app.api_route("/api/agent/runs/{run_id}/file", methods=["GET", "HEAD"])
+def agent_file(run_id: str, path: str = "", download: bool = False):
+    """查看/下载单个任务的产物（测试输出、模型补丁、任务说明）。
+
+    路径只允许落在该任务的 runs/agent/<run_id>/ 目录内，避免任意文件读取。
+    """
+    _valid_run_id(run_id)
+    root = os.path.realpath(os.path.dirname(agent.out_base(run_id)))
+    target = path if os.path.isabs(path) else os.path.join(root, path)
+    real = os.path.realpath(target)
+    if real != root and not real.startswith(root + os.sep):
+        raise HTTPException(403, "只允许查看该任务目录内的文件")
+    if not os.path.isfile(real):
+        raise HTTPException(404, "文件不存在: " + path)
+    name = os.path.basename(real)
+    media_type = ("text/plain; charset=utf-8" if name.endswith((".txt", ".patch", ".md",
+                                                                ".log", ".json", ".toml"))
+                  else "application/octet-stream")
+    if download:
+        return FileResponse(real, media_type=media_type,
+                            filename="{}_{}".format(run_id, name))
+    return FileResponse(real, media_type=media_type,
+                        headers={"Content-Disposition": 'inline; filename="{}"'.format(name)})
+
+
 # ---------------------------------------------------------------- 前端 SPA
 def _placeholder():
     """前端产物未构建时的占位页面。"""
@@ -654,6 +867,11 @@ def main():
     print("evalscope: {} ({})".format(
         "可用 " + str(info["version"]) if info["available"] else "不可用",
         info["path"] or info["error"]))
+    env = agent_core.env_report(use_cache=False)
+    print("agent 评测: pier {} docker {} egress {}".format(
+        env["pier"]["version"] or ("未安装" if not env["pier"]["available"] else "版本未知"),
+        env["docker"]["version"] if env["docker"]["ok"] else "不可用",
+        env["egress"]["state"]))
     print("服务地址: http://{}:{}".format(args.host if args.host != "0.0.0.0" else "127.0.0.1",
                                        args.port))
     target = "api:app" if args.reload else app

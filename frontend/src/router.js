@@ -1,8 +1,9 @@
 import { createRouter, createWebHistory } from 'vue-router'
 import AccuracyHome from './views/AccuracyHome.vue'
+import AgentHome from './views/AgentHome.vue'
 import StressHome from './views/StressHome.vue'
 
-// 详情页按需加载，首屏仅包含两个首页
+// 详情页按需加载，首屏仅包含三个首页
 const routes = [
   { path: '/', redirect: '/accuracy' },
   { path: '/accuracy', name: 'accuracy-home', component: AccuracyHome },
@@ -17,6 +18,12 @@ const routes = [
     name: 'stress-run',
     component: () => import('./views/StressRun.vue'),
   },
+  { path: '/agent', name: 'agent-home', component: AgentHome },
+  {
+    path: '/agent/:id',
+    name: 'agent-run',
+    component: () => import('./views/AgentRun.vue'),
+  },
   {
     path: '/accuracy/:id/csv',
     name: 'accuracy-csv',
@@ -28,6 +35,12 @@ const routes = [
     name: 'stress-csv',
     component: () => import('./views/CsvView.vue'),
     props: (route) => ({ source: 'stress', id: route.params.id }),
+  },
+  {
+    path: '/agent/:id/csv',
+    name: 'agent-csv',
+    component: () => import('./views/CsvView.vue'),
+    props: (route) => ({ source: 'agent', id: route.params.id }),
   },
   {
     path: '/csv',

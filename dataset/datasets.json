@@ -40,7 +40,11 @@
         "subject": "language"
       },
       "runnable": false,
-      "note": "SWE 类编码 agent 任务（problem_statement + 测试用例验证，需 docker 执行环境），不能用本页的单轮作答 + 裁判判分流程评测，仅作为数据集登记"
+      "note": "SWE 类编码 agent 任务：在「Agent 评测」页发起（pier + docker 逐任务沙箱判定），不走单轮作答 + 裁判判分流程",
+      "agent": {
+        "framework": "pier",
+        "tasks": "tasks"
+      }
     }
   ]
 }

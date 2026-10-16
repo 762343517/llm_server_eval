@@ -73,4 +73,21 @@ export const api = {
     request(`/api/stress/runs/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   stressCsv: (id, limit) =>
     request(`/api/stress/runs/${encodeURIComponent(id)}/csv${query({ limit })}`),
+
+  // Agent 评测：pier + docker 逐任务起沙箱，agent 改代码后由任务自带测试判定
+  agentEnv: () => request('/api/agent/env'),
+  agentTasks: (data) => request(`/api/agent/tasks${query({ data })}`),
+  agentRuns: () => request('/api/agent/runs'),
+  agentStart: (cfg) => post('/api/agent/runs', cfg),
+  agentRun: (id) => request(`/api/agent/runs/${encodeURIComponent(id)}`),
+  agentItems: (id, { limit = 200, status = '', q = '' } = {}) =>
+    request(`/api/agent/runs/${encodeURIComponent(id)}/items${query({ limit, status, q })}`),
+  // 任务产物直链：测试输出 / 模型补丁 / 任务说明（内联文本预览，download=1 触发下载）
+  agentFileUrl: (id, path, { download = false } = {}) =>
+    `/api/agent/runs/${encodeURIComponent(id)}/file${query({ path, download: download ? 1 : '' })}`,
+  agentStop: (id) => post(`/api/agent/runs/${encodeURIComponent(id)}/stop`),
+  agentDelete: (id) =>
+    request(`/api/agent/runs/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  agentCsv: (id, limit) =>
+    request(`/api/agent/runs/${encodeURIComponent(id)}/csv${query({ limit })}`),
 }

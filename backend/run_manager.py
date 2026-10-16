@@ -1,6 +1,11 @@
 """Web 评测任务管理：状态跟踪、持久化、CSV 导出。
 
 每个任务落盘于 runs/<run_id>/，服务重启后历史任务仍可查看与下载。
+
+同一套状态机被两类任务复用（构造时用 kind/worker/csv_columns 区分）：
+  accuracy  单轮作答 + 裁判判分（eval_core.run_eval），进度看 gen/judge；
+  agent     Agent 评测（agent_core.run_agent_eval：pier + docker 逐任务沙箱判定），
+            进度看 agent。
 """
 import calendar
 import collections
@@ -84,21 +89,41 @@ CSV_COLUMNS = [
     ("incomplete", "是否截断"),
 ]
 
+# Agent 评测（kind=agent）的逐任务结果表：一个任务一行
+AGENT_CSV_COLUMNS = [
+    ("original_index", "序号"),
+    ("task", "任务"),
+    ("title", "标题"),
+    ("category", "类别"),
+    ("language", "语言"),
+    ("status", "结果"),
+    ("reward", "reward"),
+    ("steps", "步数"),
+    ("input_tokens", "输入token"),
+    ("output_tokens", "输出token"),
+    ("cache_tokens", "缓存token"),
+    ("elapsed_s", "耗时s"),
+    ("error", "异常"),
+    ("verifier_tail", "判定输出"),
+    ("trial_dir", "产物目录"),
+]
+
 
 class RunState:
     """单个评测任务的内存状态（线程安全）。"""
 
-    def __init__(self, run_id, cfg, out):
+    def __init__(self, run_id, cfg, out, kind="accuracy"):
         self.run_id = run_id
         self.cfg = cfg
         self.out = out
+        self.kind = kind
         self.dir = os.path.dirname(out)
         self.meta_path = os.path.join(self.dir, "meta.json")
         # 可重入锁：on_event 持锁期间会调用 log()/snapshot()，普通 Lock 会导致自锁
         self.lock = threading.RLock()
         # queued（排队中）| running | succeeded | failed | stopped | interrupted
         self.status = "running"
-        self.phase = "init"          # init|gen|judge|summary|done
+        self.phase = "init"          # init|load|gen|judge|agent|done
         self.error = None
         self.started_at = time.time()
         self.finished_at = None
@@ -112,6 +137,10 @@ class RunState:
                     "max_tokens": 0}
         self.judge = {"done": 0, "total": 0, "errors": 0, "elapsed_s": 0.0,
                       "cached": 0}
+        # 终端 Agent 评测进度（kind=terminal 时使用；其余任务类型保持全 0）
+        self.agent = {"done": 0, "total": 0, "errors": 0, "resolved": 0,
+                      "steps": 0, "tokens": 0, "elapsed_s": 0.0, "tps": 0.0,
+                      "cached": 0, "todo": 0, "max_steps": 0, "max_tokens": 0}
         self.summary = None
         self.logs = collections.deque(maxlen=400)
         self.stop_event = threading.Event()
@@ -133,8 +162,12 @@ class RunState:
                              "total": p.get("total", 0),
                              "images": p.get("images", 0)}
             elif kind == "load_end":
-                self.log("[加载] 完成 {} 题，带图 {} 题".format(
-                    p.get("rows", 0), p.get("images", 0)))
+                if self.kind == "agent":
+                    self.log("[加载] 完成 {} 个任务，跳过 {} 个".format(
+                        p.get("rows", 0), p.get("skipped", 0)))
+                else:
+                    self.log("[加载] 完成 {} 题，带图 {} 题".format(
+                        p.get("rows", 0), p.get("images", 0)))
             elif kind == "gen_start":
                 self.phase = "gen"
                 self.gen.update({
@@ -177,6 +210,52 @@ class RunState:
                                    "elapsed_s": p["elapsed_s"]})
                 self.log("[judge] 完成 {} 题，失败 {}，耗时 {:.1f} 分钟".format(
                     p["done"], p["errors"], p["elapsed_s"] / 60))
+            elif kind == "task_start":
+                # 容器类任务带镜像信息；Agent 评测的任务由 pier 自行准备环境
+                self.log("[任务] #{} {} 启动{}".format(
+                    p.get("index"), p.get("task_id"),
+                    "，镜像 " + str(p["image"]) if p.get("image") else ""))
+            elif kind == "task_log":
+                self.log(p.get("msg", ""))
+            elif kind == "step":
+                if p.get("command"):
+                    self.log("[步骤] #{i} 第 {n} 步 退出码 {c} 耗时 {s}s $ {cmd}"
+                             .format(i=p.get("index"), n=p.get("step"),
+                                     c=p.get("exit_code"), s=p.get("elapsed_s", 0),
+                                     cmd=p["command"]))
+                else:
+                    self.log("[步骤] #{i} 第 {n} 步 模型未给出命令：{a}".format(
+                        i=p.get("index"), n=p.get("step"),
+                        a=(p.get("assistant") or "").replace("\n", " ")[:200]))
+            elif kind == "task_done":
+                # elapsed_s 可能缺失（例如容器异常退出），此时不硬凑数字
+                elapsed = p.get("elapsed_s")
+                self.log("[任务] #{} {} {}，步数 {}，耗时 {}{}".format(
+                    p.get("index", "-"), p.get("task_id"),
+                    {"resolved": "通过", "unresolved": "未通过",
+                     "error": "异常"}.get(p.get("status"), p.get("status")),
+                    p.get("steps", 0),
+                    "{:.1f}s".format(elapsed) if elapsed else "—",
+                    ("，错误：" + str(p.get("error"))[:200])
+                    if p.get("error") else ""))
+            elif kind == "agent_start":
+                self.phase = "agent"
+                self.agent.update({"total": p["total"], "cached": p["cached"],
+                                   "todo": p["todo"], "max_steps": 0,
+                                   "max_tokens": 0})
+                self.log("[agent] 任务集 {} 总任务 {} 待跑 {} 并发 {} agent {} 模型 {}".format(
+                    p.get("dataset", "-"), p["total"], p["todo"],
+                    p.get("concurrency"), p.get("agent", "-"), p.get("model", "-")))
+            elif kind == "agent_progress":
+                self.agent.update(p)
+            elif kind == "agent_end":
+                self.agent.update({"done": p["done"], "errors": p["errors"],
+                                   "resolved": p["resolved"],
+                                   "elapsed_s": p["elapsed_s"]})
+                self.log("[agent] 完成 {} 个任务，通过 {}，异常 {}，耗时 {:.1f} 分钟{}"
+                         .format(p["done"], p["resolved"], p["errors"],
+                                 p["elapsed_s"] / 60,
+                                 "（已停止）" if p.get("stopped") else ""))
             elif kind == "item_failed":
                 self.log("[{}-失败] 第 {} 题：{}".format(
                     p["stage"], p["index"], p["error"]))
@@ -186,7 +265,8 @@ class RunState:
             elif kind == "summary":
                 self.summary = p["summary"]
                 self.phase = "done"
-        if kind in ("gen_progress", "judge_progress"):
+        # 高频事件只更新内存进度，不落盘（否则每题一次 fsync 会拖慢评测）
+        if kind in ("gen_progress", "judge_progress", "agent_progress", "step"):
             return
         self.save()
 
@@ -206,9 +286,11 @@ class RunState:
                 # 排队中尚未开始执行，耗时不进入统计（前端显示为 —）
                 "duration_s": 0.0 if self.status == "queued" else round(
                     (self.finished_at or time.time()) - self.started_at, 1),
+                "kind": self.kind,
                 "load": dict(self.load),
                 "gen": dict(self.gen),
                 "judge": dict(self.judge),
+                "agent": dict(self.agent),
                 "summary": self.summary,
                 "progress": self._progress(),
             }
@@ -220,6 +302,11 @@ class RunState:
         """归一化总体进度百分比与阶段描述。"""
         if self.status == "queued":
             return {"stage": "排队中", "pct": 0.0, "text": "等待前序任务完成"}
+        if self.phase == "agent" and self.agent["todo"]:
+            return {"stage": "容器执行", "pct": round(
+                100 * self.agent["done"] / self.agent["todo"], 1),
+                "text": "{}/{} 个任务".format(self.agent["done"],
+                                              self.agent["todo"])}
         if self.phase == "gen" and self.gen["todo"]:
             return {"stage": "生成", "pct": round(
                 100 * self.gen["done"] / self.gen["todo"], 1),
@@ -253,8 +340,13 @@ class RunState:
 
 
 class RunManager:
-    def __init__(self, runs_dir=RUNS_DIR):
+    def __init__(self, runs_dir=RUNS_DIR, kind="accuracy", worker=None,
+                 csv_columns=None):
+        """kind 决定队列里的任务名与日志措辞；worker 缺省时走精度测试的评测核心。"""
         self.runs_dir = runs_dir
+        self.kind = kind
+        self.worker = worker
+        self.csv_columns = csv_columns or CSV_COLUMNS
         self._states = {}
         self._lock = threading.Lock()
         os.makedirs(runs_dir, exist_ok=True)
@@ -271,13 +363,13 @@ class RunManager:
         for k in ("api_key", "judge_api_key"):
             if safe_cfg.get(k):
                 safe_cfg[k] = _mask(safe_cfg[k])
-        state = RunState(run_id, safe_cfg, out)
+        state = RunState(run_id, safe_cfg, out, kind=self.kind)
         state.status = "queued"
         with self._lock:
             self._states[run_id] = state
         state.log("[排队] 已加入全局测试队列，等待前序任务完成")
         state.save()
-        task_queue.QUEUE.submit("accuracy", run_id,
+        task_queue.QUEUE.submit(self.kind, run_id,
                                 lambda: self._run_queued(state, cfg))
         return run_id
 
@@ -293,24 +385,32 @@ class RunManager:
             return
         state.status = "running"
         state.started_at = time.time()       # 时长只统计真正执行的时间
-        state.log("[开始] 轮到本任务，模型 {} 端点 {} 裁判模型 {} 裁判端点 {}".format(
-            state.cfg.get("model"), state.cfg.get("endpoint"),
-            state.cfg.get("judge_model"),
-            state.cfg.get("judge_endpoint") or state.cfg.get("endpoint")))
+        if self.kind == "agent":
+            state.log("[开始] 轮到本任务，agent {} 模型 {} 端点 {} 并发 {} 任务数 {}".format(
+                state.cfg.get("agent"), state.cfg.get("model"),
+                state.cfg.get("endpoint"), state.cfg.get("concurrency"),
+                state.cfg.get("limit")))
+        else:
+            state.log("[开始] 轮到本任务，模型 {} 端点 {} 裁判模型 {} 裁判端点 {}"
+                      .format(state.cfg.get("model"), state.cfg.get("endpoint"),
+                              state.cfg.get("judge_model"),
+                              state.cfg.get("judge_endpoint")
+                              or state.cfg.get("endpoint")))
         state.save()
         self._worker(state, cfg)
 
     def _worker(self, state, cfg):
         cfg = dict(cfg)
         cfg["out"] = state.out
+        run = self.worker or eval_core.run_eval
         try:
-            summary = eval_core.run_eval(
+            summary = run(
                 cfg, on_event=state.on_event,
                 should_stop=state.stop_event.is_set,
             )
             if summary is None:
                 state.status = "failed"
-                state.error = "没有可用记录可汇总"
+                state.error = "没有可用结果可汇总"
             elif state.stop_event.is_set():
                 state.status = "stopped"
             else:
@@ -411,11 +511,12 @@ class RunManager:
             return None, 0
         dest = dest or os.path.join(self.out_base(run_id) + ".csv")
         os.makedirs(os.path.dirname(dest) or ".", exist_ok=True)
+        columns = self.csv_columns or CSV_COLUMNS
         with open(dest, "w", newline="", encoding="utf-8-sig") as f:
             w = csv.writer(f)
-            w.writerow([c[1] for c in CSV_COLUMNS])
+            w.writerow([c[1] for c in columns])
             for r in rows:
-                w.writerow([_cell(r.get(k)) for k, _ in CSV_COLUMNS])
+                w.writerow([_cell(r.get(k)) for k, _ in columns])
         return dest, len(rows)
 
     def delete(self, run_id):

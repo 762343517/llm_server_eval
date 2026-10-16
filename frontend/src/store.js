@@ -27,6 +27,20 @@ export const store = reactive({
   get stressDefaults() {
     return (this.meta && this.meta.stress && this.meta.stress.defaults) || {}
   },
+  get agentDefaults() {
+    return (this.meta && this.meta.agent && this.meta.agent.defaults) || {}
+  },
+  // 能跑 Agent 评测的数据集（datasets.json 里声明了 agent 段）
+  get agentDatasets() {
+    return (this.meta && this.meta.agent && this.meta.agent.datasets) || []
+  },
+  get agentChoices() {
+    return (this.meta && this.meta.agent && this.meta.agent.agent_choices) || []
+  },
+  // docker / pier / egress 端口适配的自检结果
+  get agentEnv() {
+    return (this.meta && this.meta.agent && this.meta.agent.env) || {}
+  },
   get evalscope() {
     return (this.meta && this.meta.stress && this.meta.stress.evalscope) || {}
   },
