@@ -83,8 +83,11 @@ DEFAULT_AGENT_POLL_SECONDS = 3.0      # 轮询 pier 结果文件的间隔
 
 # 任务镜像（如 alexgshaw/xxx:tag）直连 registry-1.docker.io 在内网会超时。这里按顺序尝试
 # 镜像加速器：先拉 `<加速器>/<原镜像>`，再 tag 回任务声明的原名（pier 只认原名）。
+# 只对 Docker Hub 镜像生效——加速器不代理 ECR/ghcr 等，套前缀会把本来能拉的镜像改坏。
 # 可用 ZHIPU_EVAL_IMAGE_MIRRORS 覆盖（逗号分隔），设为空串表示只用本机已有镜像。
-DEFAULT_IMAGE_MIRRORS = ("docker.1ms.run", "docker.xuanyuan.me", "docker.m.daocloud.io")
+# 与 /etc/docker/daemon.json 的 registry-mirrors 保持一致；daemon 生效时直连原名即可。
+# 原列表里的 docker.xuanyuan.me 实测要求付费开通，已移除。
+DEFAULT_IMAGE_MIRRORS = ("docker.1ms.run", "docker.m.daocloud.io", "docker.1panel.live", "hub.rat.dev")
 DEFAULT_IMAGE_PULL_TIMEOUT = 600      # 单个镜像拉取上限（秒）：镜像可达数 GB
 
 # 请求模式：chat = 自定义会话提问；long = 长序列 + 固定前缀（Prefix Cache 命中率）

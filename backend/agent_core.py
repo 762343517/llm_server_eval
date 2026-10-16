@@ -192,13 +192,51 @@ def image_mirrors():
     return [p.strip().strip("/") for p in raw.split(",") if p.strip()]
 
 
+def is_docker_hub(image):
+    """镜像是否归 Docker Hub —— 只有 Docker Hub 镜像才能套加速器前缀。
+
+    加速器（docker.1ms.run / docker.m.daocloud.io 等）只代理 Docker Hub。
+    带显式仓库主机的镜像（public.ecr.aws/…、ghcr.io/…、quay.io/…、localhost:5000/…）
+    套上前缀会拼成加速器根本不认识的引用，实测报 failed to resolve reference、
+    invalid repository、要求付费开通，把本来直连就能拉到的镜像变成失败。
+    """
+    parts = image.split("/")
+    if len(parts) < 2:                                  # 裸名（ubuntu:24.04）就是官方 library
+        return True
+    first = parts[0]
+    return not ("." in first or ":" in first or first == "localhost")
+
+
+_HUB_DIRECT = {"ok": None}          # Docker Hub 直连是否可用：None 未探、True 可用、False 不通
+
+
+def _hub_direct_worth_trying():
+    """本进程内是否还值得先直连 Docker Hub：探到一次不通后不再重复吃 6s 超时。"""
+    return _HUB_DIRECT["ok"] is not False
+
+
+def _pull_candidates(image):
+    """给出一条镜像的拉取候选引用：[直连原名, 加速器前缀…]。
+
+    两类仓库在这里的可达性正好相反，所以候选顺序不同：
+      * ECR / ghcr / quay 等：直连正常，加速器前缀一律不适用，只有原名一个候选；
+      * Docker Hub：直连在内网超时，需经加速器拉取后 tag 回原名。daemon.json 的
+        registry-mirrors 生效时，第一个候选（原名）也会由 daemon 自动送到加速器。
+    """
+    if not is_docker_hub(image):
+        return [image]
+    candidates = [image] if _hub_direct_worth_trying() else []
+    candidates += ["{}/{}".format(prefix, image) for prefix in image_mirrors()]
+    return candidates
+
+
 def ensure_images_local(images, on_event=None):
-    """把本机缺失的任务镜像经加速器取回并 tag 回原名，返回 (ready, failed)。
+    """把本机缺失的任务镜像取回并 tag 回原名，返回 (ready, failed)。
 
     为什么要主动做：pier 每次跑完会 `docker compose down --rmi all`，把任务镜像的 tag 撤掉
-    （镜像 ID 若还有别的 tag 则不会真删）；下一次运行于是必须重新拉取，而直连
-    registry-1.docker.io 在内网会超时，整个 run 会被记成「环境错误」而不是「判分不通过」。
-    这里在起 pier 之前把镜像补齐，补不齐就提前报错并指明缺哪个。
+    （镜像 ID 若还有别的 tag 则不会真删）；下一次运行于是必须重新拉取，拉不到整个 run 会被
+    记成「环境错误」而不是「判分不通过」。这里在起 pier 之前把镜像补齐，补不齐就提前报错并
+    指明缺哪个。
     """
     emit = on_event or (lambda kind, payload=None: None)
     refresh_images()
@@ -210,20 +248,28 @@ def ensure_images_local(images, on_event=None):
         return [], missing
     ready, failed = [], []
     for image in missing:
+        hub = is_docker_hub(image)
         ok = False
-        for prefix in image_mirrors():
-            alt = "{}/{}".format(prefix, image)
-            emit("task_log", {"msg": "[镜像] 经 {} 取回 {} …".format(prefix, image)})
-            rc, out = _run(wrap_argv(["docker", "pull", alt], docker["mode"]),
+        for ref in _pull_candidates(image):
+            if ref != image:
+                emit("task_log", {"msg": "[镜像] 经 {} 取回 {} …".format(
+                    ref.split("/", 1)[0], image)})
+            rc, out = _run(wrap_argv(["docker", "pull", ref], docker["mode"]),
                            timeout=consts.DEFAULT_IMAGE_PULL_TIMEOUT)
             if rc != 0:
+                if hub and ref == image:
+                    _HUB_DIRECT["ok"] = False            # 记住直连不通，后续镜像不再重试
                 emit("task_log", {"msg": "[镜像] {} 拉取失败：{}".format(
-                    alt, _last_line(out) or "未知原因")})
+                    ref, _last_line(out) or "未知原因")})
                 continue
-            rc2, out2 = _run(wrap_argv(["docker", "tag", alt, image], docker["mode"]), timeout=60)
-            if rc2 != 0:
-                emit("task_log", {"msg": "[镜像] tag 失败：{}".format(_last_line(out2))})
-                continue
+            if hub and ref == image:
+                _HUB_DIRECT["ok"] = True
+            if ref != image:
+                rc2, out2 = _run(wrap_argv(["docker", "tag", ref, image], docker["mode"]),
+                                 timeout=60)
+                if rc2 != 0:
+                    emit("task_log", {"msg": "[镜像] tag 失败：{}".format(_last_line(out2))})
+                    continue
             ok = True
             emit("task_log", {"msg": "[镜像] 已就绪：{}".format(image)})
             break
