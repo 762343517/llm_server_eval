@@ -179,6 +179,59 @@ def known_images():
     return tags
 
 
+def refresh_images():
+    """作废镜像清单缓存：pier 跑完会撤掉镜像 tag，run 开始时必须拿到实时快照。"""
+    _IMAGE_CACHE.update({"at": 0.0, "tags": set()})
+
+
+def image_mirrors():
+    """镜像加速器前缀列表：环境变量可覆盖，空串表示禁用（只用本机已有镜像）。"""
+    raw = os.environ.get("ZHIPU_EVAL_IMAGE_MIRRORS")
+    if raw is None:
+        return list(consts.DEFAULT_IMAGE_MIRRORS)
+    return [p.strip().strip("/") for p in raw.split(",") if p.strip()]
+
+
+def ensure_images_local(images, on_event=None):
+    """把本机缺失的任务镜像经加速器取回并 tag 回原名，返回 (ready, failed)。
+
+    为什么要主动做：pier 每次跑完会 `docker compose down --rmi all`，把任务镜像的 tag 撤掉
+    （镜像 ID 若还有别的 tag 则不会真删）；下一次运行于是必须重新拉取，而直连
+    registry-1.docker.io 在内网会超时，整个 run 会被记成「环境错误」而不是「判分不通过」。
+    这里在起 pier 之前把镜像补齐，补不齐就提前报错并指明缺哪个。
+    """
+    emit = on_event or (lambda kind, payload=None: None)
+    refresh_images()
+    missing = [img for img in dict.fromkeys(images) if img and img not in known_images()]
+    if not missing:
+        return [], []
+    docker = docker_state()
+    if not docker["ok"]:
+        return [], missing
+    ready, failed = [], []
+    for image in missing:
+        ok = False
+        for prefix in image_mirrors():
+            alt = "{}/{}".format(prefix, image)
+            emit("task_log", {"msg": "[镜像] 经 {} 取回 {} …".format(prefix, image)})
+            rc, out = _run(wrap_argv(["docker", "pull", alt], docker["mode"]),
+                           timeout=consts.DEFAULT_IMAGE_PULL_TIMEOUT)
+            if rc != 0:
+                emit("task_log", {"msg": "[镜像] {} 拉取失败：{}".format(
+                    alt, _last_line(out) or "未知原因")})
+                continue
+            rc2, out2 = _run(wrap_argv(["docker", "tag", alt, image], docker["mode"]), timeout=60)
+            if rc2 != 0:
+                emit("task_log", {"msg": "[镜像] tag 失败：{}".format(_last_line(out2))})
+                continue
+            ok = True
+            emit("task_log", {"msg": "[镜像] 已就绪：{}".format(image)})
+            break
+        (ready if ok else failed).append(image)
+    refresh_images()                                     # 让 known_images 下次重新枚举
+    return ready, failed
+
+
 # --------------------------------------------------------------- egress 代理端口适配
 def _pier_setup_path():
     """定位 pier 包内的 environments/agent_setup.py（通过 pier 所在 venv 的 python）。"""
@@ -720,6 +773,7 @@ def run_agent_eval(cfg, on_event=None, should_stop=None):
     directory = resolve_tasks_dir(cfg.get("data"))
     if not directory or not os.path.isdir(directory):
         raise RuntimeError("任务目录不存在: {}".format(directory or cfg.get("data") or "-"))
+    refresh_images()                  # 上一轮 run 可能刚把镜像 tag 撤掉，这里取实时快照
     catalogue = list_tasks(directory)
     if not catalogue:
         raise RuntimeError("{} 下没有找到任务（任务目录需含 task.toml）".format(directory))
@@ -751,10 +805,16 @@ def run_agent_eval(cfg, on_event=None, should_stop=None):
     argv, shown = build_command(cfg, directory, [t["name"] for t in selected],
                                 jobs_dir, job_name)
     on_event("task_log", {"msg": "[命令] " + shown})
-    pending_images = [t["name"] for t in selected if not t["image_ready"]]
+    pending_images = [t for t in selected if not t["image_ready"] and t["docker_image"]]
     if pending_images:
-        on_event("task_log", {"msg": "[镜像] {} 个任务的镜像不在本机，首次运行需等待下载".format(
-            len(pending_images))})
+        on_event("task_log", {"msg": "[镜像] {} 个任务的镜像不在本机，尝试经加速器取回"
+                                      "（pier 每次跑完会撤掉镜像 tag）".format(
+                                          len(pending_images))})
+        _, failed = ensure_images_local([t["docker_image"] for t in pending_images], on_event)
+        if failed:
+            raise RuntimeError("以下任务镜像本机缺失且取回失败：{}。请检查网络，或用 "
+                               "ZHIPU_EVAL_IMAGE_MIRRORS 指定可用的镜像加速器。".format(
+                                   "、".join(failed[:5])))
 
     started = time.time()
     on_event("agent_start", {

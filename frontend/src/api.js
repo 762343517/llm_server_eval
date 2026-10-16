@@ -79,6 +79,7 @@ export const api = {
   agentTasks: (data) => request(`/api/agent/tasks${query({ data })}`),
   agentRuns: () => request('/api/agent/runs'),
   agentStart: (cfg) => post('/api/agent/runs', cfg),
+  agentSaveConfig: (cfg) => post('/api/agent/config', cfg),
   agentRun: (id) => request(`/api/agent/runs/${encodeURIComponent(id)}`),
   agentItems: (id, { limit = 200, status = '', q = '' } = {}) =>
     request(`/api/agent/runs/${encodeURIComponent(id)}/items${query({ limit, status, q })}`),

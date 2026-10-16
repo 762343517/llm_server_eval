@@ -16,7 +16,9 @@ const tasks = ref([])
 const taskTotal = ref(0)
 const showTasks = ref(false)
 const error = ref('')
+const notice = ref('')
 const submitting = ref(false)
+const saving = ref(false)
 const refreshing = ref(false)
 const busyId = ref('')
 let timer = null
@@ -58,14 +60,18 @@ const queueText = computed(() => {
 
 const applyDefaults = () => {
   const d = store.agentDefaults
+  // 上次保存的任务集可能来自「自定义任务集路径」（不在下拉候选里），此时回填到自定义框，
+  // 否则下拉框会显示空白
+  const known = datasets.value.map((x) => (x.agent || {}).tasks_dir)
+  const custom = d.data && !known.includes(d.data) ? d.data : ''
   Object.assign(form, {
     agent: d.agent || 'mini-swe-agent',
     endpoint: d.endpoint || '',
     api_key: d.api_key || '',
     model: d.model || '',
     model_class: d.model_class || 'litellm',
-    data: d.data || '',
-    data_custom: '',
+    data: custom ? known[0] || '' : d.data || '',
+    data_custom: custom,
     tasks: '',
     limit: d.limit ?? 1,
     seed: d.seed ?? 0,
@@ -118,8 +124,26 @@ const loadAll = async (force = false) => {
   refreshing.value = false
 }
 
+// 手动保存：只校验并落盘，不启动任务（改了表单没启动 / 启动被拒时配置不会丢）
+const saveConfig = async () => {
+  error.value = ''
+  notice.value = ''
+  saving.value = true
+  try {
+    await api.agentSaveConfig({ ...form, data: form.data_custom || form.data })
+    // 只刷新 meta 取新的 saved_cfg_at，不再 applyDefaults，避免覆盖当前表单
+    await store.load(true)
+    notice.value = `配置已保存（${savedAt.value}），下次打开本页会沿用`
+  } catch (e) {
+    error.value = e.message
+  } finally {
+    saving.value = false
+  }
+}
+
 const submit = async () => {
   error.value = ''
+  notice.value = ''
   submitting.value = true
   try {
     const { run_id: runId } = await api.agentStart({
@@ -184,6 +208,7 @@ onUnmounted(() => timer && clearInterval(timer))
   </div>
 
   <div v-if="error" class="alert bad">{{ error }}</div>
+  <div v-if="notice" class="alert info">{{ notice }}</div>
   <div v-if="!envReady" class="alert warn">
     Agent 评测环境尚未就绪：{{ (env.notes || []).join('；') || '缺少 docker 或 pier' }}
   </div>
@@ -199,7 +224,7 @@ onUnmounted(() => timer && clearInterval(timer))
     <Card title="新建评测任务" nested>
       <p class="hint">
         Agent 评测与精度/压测共用同一条串行测试队列，避免并行占用机器资源
-        <span v-if="savedAt"> · 表单已沿用上次提交的配置（{{ savedAt }}）</span>
+        <span v-if="savedAt"> · 表单已沿用上次保存的配置（{{ savedAt }}），改动后可点「保存配置」留作默认值</span>
       </p>
 
       <div class="grid">
@@ -270,7 +295,8 @@ onUnmounted(() => timer && clearInterval(timer))
               <th>类别</th>
               <th>语言</th>
               <th class="center">镜像</th>
-              <th class="num">超时(s)</th>
+              <th class="num">agent超时(s)</th>
+              <th class="num">判定超时(s)</th>
             </tr>
           </thead>
           <tbody>
@@ -325,6 +351,9 @@ onUnmounted(() => timer && clearInterval(timer))
     <div class="row mt">
       <button class="btn primary" :disabled="submitting || !envReady" @click="submit">
         {{ submitting ? '正在启动…' : '启动 Agent 评测' }}
+      </button>
+      <button class="btn" :disabled="saving" @click="saveConfig">
+        {{ saving ? '保存中…' : '保存配置' }}
       </button>
       <span class="muted">
         启动后进入任务详情页；镜像首次拉取需要等待，agent 每步耗时都较长，请耐心观察日志。

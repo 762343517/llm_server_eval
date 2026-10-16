@@ -81,6 +81,12 @@ DEFAULT_AGENT_TIMEOUT_MULTIPLIER = 1.0
 DEFAULT_AGENT_VERIFIER_TIMEOUT_MULTIPLIER = 1.0
 DEFAULT_AGENT_POLL_SECONDS = 3.0      # 轮询 pier 结果文件的间隔
 
+# 任务镜像（如 alexgshaw/xxx:tag）直连 registry-1.docker.io 在内网会超时。这里按顺序尝试
+# 镜像加速器：先拉 `<加速器>/<原镜像>`，再 tag 回任务声明的原名（pier 只认原名）。
+# 可用 ZHIPU_EVAL_IMAGE_MIRRORS 覆盖（逗号分隔），设为空串表示只用本机已有镜像。
+DEFAULT_IMAGE_MIRRORS = ("docker.1ms.run", "docker.xuanyuan.me", "docker.m.daocloud.io")
+DEFAULT_IMAGE_PULL_TIMEOUT = 600      # 单个镜像拉取上限（秒）：镜像可达数 GB
+
 # 请求模式：chat = 自定义会话提问；long = 长序列 + 固定前缀（Prefix Cache 命中率）
 DEFAULT_STRESS_PROMPT_MODE = "chat"
 # 长序列模式：分词器路径（evalscope 的 random 数据集按 token 精确生成，必需）

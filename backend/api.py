@@ -6,8 +6,8 @@
   /api/stress/*             压力测试：任务列表 / 启动 / 保存配置 / 详情 / 明细 / 停止 /
                             删除 / CSV / 原始产物（benchmark.log、performance_summary.txt、
                             perf_report.html）
-  /api/agent/*              Agent 评测：环境自检 / 任务清单 / 启动 / 详情 / 逐任务 /
-                            停止 / 删除 / CSV / 产物（测试输出、模型补丁）
+  /api/agent/*              Agent 评测：环境自检 / 任务清单 / 启动 / 保存配置 / 详情 /
+                            逐任务 / 停止 / 删除 / CSV / 产物（测试输出、模型补丁）
   /api/csv                  工作区内 CSV 文件预览
 其余路径交给 SPA（产物在 backend/webui/），未命中的静态文件回落到 index.html。
 """
@@ -688,9 +688,17 @@ def _agent_cfg(payload):
         "timeout_multiplier": timeout,
         "verifier_timeout_multiplier": verifier_timeout,
     }
+    return cfg
+
+
+def _save_agent_last_cfg(cfg):
+    """落盘「上次 Agent 配置」，作为下次打开页面的表单默认值。
+
+    只保留静态默认里声明过的字段，避免把运行时派生的值写回表单；「指定任务」不在其中
+    （agent_defaults 没有该键），它是一次性的复现入口，不该在下次打开页面时静默生效。
+    """
     saved = {k: cfg[k] for k in appconfig.agent_defaults() if k in cfg}
     appconfig.save_last_cfg(appconfig.LAST_AGENT_CFG_NAME, saved)
-    return cfg
 
 
 @app.get("/api/agent/env")
@@ -722,7 +730,25 @@ def agent_runs():
 @app.post("/api/agent/runs")
 def agent_start(payload: dict):
     cfg = _agent_cfg(payload or {})
-    return JSONResponse({"run_id": agent.start(cfg)})
+    run_id = agent.start(cfg)
+    _save_agent_last_cfg(cfg)
+    return JSONResponse({"run_id": run_id})
+
+
+@app.post("/api/agent/config")
+def agent_save_config(payload: dict):
+    """手动保存 Agent 评测配置：只校验并落盘，不启动任务。
+
+    默认只在任务成功启动后才落盘（见 agent_start），因此「改了表单没启动」或
+    「启动被拒（参数非法、环境未就绪等）」时配置都会丢；这里提供显式保存入口。
+    校验口径与启动完全一致，避免把非法值存成下次打开页面的默认值。
+    """
+    cfg = _agent_cfg(payload or {})
+    _save_agent_last_cfg(cfg)
+    return JSONResponse({
+        "saved_at": _mtime(os.path.join(run_manager.RUNS_DIR,
+                                        appconfig.LAST_AGENT_CFG_NAME)),
+    })
 
 
 @app.get("/api/agent/runs/{run_id}")
