@@ -385,11 +385,15 @@ class RunManager:
                 cfg, on_event=state.on_event,
                 should_stop=state.stop_event.is_set,
             )
-            if summary is None:
+            if state.stop_event.is_set():
+                # 停止优先于「无结果」：停止可能发生在还没有任何结果的阶段（如镜像取回），
+                # 此时不返回 summary，若先判 None 会把「用户停止」误记成「任务失败」。
+                state.status = "stopped"
+                if summary is None:
+                    state.error = "任务在产出结果前被手动停止"
+            elif summary is None:
                 state.status = "failed"
                 state.error = "没有可用结果可汇总"
-            elif state.stop_event.is_set():
-                state.status = "stopped"
             else:
                 state.status = "succeeded"
         except Exception as e:  # noqa: BLE001

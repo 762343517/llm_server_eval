@@ -21,6 +21,7 @@ import shlex
 import shutil
 import signal
 import subprocess
+import tempfile
 import threading
 import time
 
@@ -76,6 +77,55 @@ def _run(argv, timeout=30):
     except OSError as exc:
         return -1, "命令不可用：{}".format(exc)
     return proc.returncode, proc.stdout.decode("utf-8", "replace")
+
+
+def _kill_group(proc):
+    """强杀子进程及其整个进程组：只杀父进程会留下 docker pull 这类子进程。"""
+    try:
+        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+    except OSError:
+        try:
+            proc.kill()
+        except OSError:
+            pass
+
+
+def _run_interruptible(argv, timeout, should_stop, poll=0.5):
+    """执行命令，期间可被 should_stop 打断；返回 (returncode, 输出尾部)。
+
+    _run 是阻塞的 subprocess.run，而 docker pull 单个镜像可能持续几分钟（数 GB），这段
+    时间里「停止」会完全失效。这里改为轮询：收到停止请求或超时就杀掉整个进程组。
+    输出落到临时文件而不是管道，避免无人读取时管道被写满、把子进程卡死。
+    """
+    tmp = tempfile.TemporaryFile()
+    try:
+        proc = subprocess.Popen(argv, stdout=tmp, stderr=subprocess.STDOUT,
+                                start_new_session=True)
+    except OSError as exc:
+        tmp.close()
+        return -1, "命令不可用：{}".format(exc)
+    deadline = time.time() + timeout
+    note = ""
+    while proc.poll() is None:
+        if should_stop():
+            note = "已按停止请求中止"
+            _kill_group(proc)
+            break
+        if time.time() > deadline:
+            note = "命令超时（{}s）".format(timeout)
+            _kill_group(proc)
+            break
+        time.sleep(poll)
+    try:
+        tmp.seek(0, os.SEEK_END)
+        size = tmp.tell()
+        tmp.seek(max(0, size - 8192))        # 只取尾部：失败原因总在最后几行
+        out = tmp.read().decode("utf-8", "replace")
+    finally:
+        tmp.close()
+    if note:
+        return -1, (out.rstrip() + "\n" + note) if out.strip() else note
+    return proc.returncode, out
 
 
 def _last_line(text):
@@ -230,15 +280,19 @@ def _pull_candidates(image):
     return candidates
 
 
-def ensure_images_local(images, on_event=None):
+def ensure_images_local(images, on_event=None, should_stop=None):
     """把本机缺失的任务镜像取回并 tag 回原名，返回 (ready, failed)。
 
     为什么要主动做：pier 每次跑完会 `docker compose down --rmi all`，把任务镜像的 tag 撤掉
     （镜像 ID 若还有别的 tag 则不会真删）；下一次运行于是必须重新拉取，拉不到整个 run 会被
     记成「环境错误」而不是「判分不通过」。这里在起 pier 之前把镜像补齐，补不齐就提前报错并
     指明缺哪个。
+
+    should_stop 为真时立即中止：已取回的保留，未处理的既不记入 ready 也不记入 failed，
+    调用方应据此区分「被用户停止」与「网络取回失败」。
     """
     emit = on_event or (lambda kind, payload=None: None)
+    should_stop = should_stop or (lambda: False)
     refresh_images()
     missing = [img for img in dict.fromkeys(images) if img and img not in known_images()]
     if not missing:
@@ -247,16 +301,23 @@ def ensure_images_local(images, on_event=None):
     if not docker["ok"]:
         return [], missing
     ready, failed = [], []
+    stopped = False
     for image in missing:
+        if should_stop():
+            stopped = True
+            break
         hub = is_docker_hub(image)
         ok = False
         for ref in _pull_candidates(image):
             if ref != image:
                 emit("task_log", {"msg": "[镜像] 经 {} 取回 {} …".format(
                     ref.split("/", 1)[0], image)})
-            rc, out = _run(wrap_argv(["docker", "pull", ref], docker["mode"]),
-                           timeout=consts.DEFAULT_IMAGE_PULL_TIMEOUT)
+            rc, out = _run_interruptible(wrap_argv(["docker", "pull", ref], docker["mode"]),
+                                         consts.DEFAULT_IMAGE_PULL_TIMEOUT, should_stop)
             if rc != 0:
+                if should_stop():               # 是被停止打断的，不当作拉取失败
+                    stopped = True
+                    break
                 if hub and ref == image:
                     _HUB_DIRECT["ok"] = False            # 记住直连不通，后续镜像不再重试
                 emit("task_log", {"msg": "[镜像] {} 拉取失败：{}".format(
@@ -273,7 +334,12 @@ def ensure_images_local(images, on_event=None):
             ok = True
             emit("task_log", {"msg": "[镜像] 已就绪：{}".format(image)})
             break
+        if stopped:
+            break
         (ready if ok else failed).append(image)
+    if stopped:
+        emit("task_log", {"msg": "[停止] 已中止镜像取回：已就绪 {} 个，未处理 {} 个".format(
+            len(ready), len(missing) - len(ready) - len(failed))})
     refresh_images()                                     # 让 known_images 下次重新枚举
     return ready, failed
 
@@ -853,10 +919,15 @@ def run_agent_eval(cfg, on_event=None, should_stop=None):
     on_event("task_log", {"msg": "[命令] " + shown})
     pending_images = [t for t in selected if not t["image_ready"] and t["docker_image"]]
     if pending_images:
-        on_event("task_log", {"msg": "[镜像] {} 个任务的镜像不在本机，尝试经加速器取回"
+        on_event("task_log", {"msg": "[镜像] {} 个任务的镜像不在本机，尝试取回"
                                       "（pier 每次跑完会撤掉镜像 tag）".format(
                                           len(pending_images))})
-        _, failed = ensure_images_local([t["docker_image"] for t in pending_images], on_event)
+        _, failed = ensure_images_local([t["docker_image"] for t in pending_images],
+                                        on_event, should_stop=should_stop)
+        if should_stop():
+            # 停止可能发生在镜像取回阶段：此时还没起 pier，直接收敛为「已停止」
+            on_event("task_log", {"msg": "[停止] 镜像取回阶段收到停止请求，本轮不启动 pier"})
+            return None
         if failed:
             raise RuntimeError("以下任务镜像本机缺失且取回失败：{}。请检查网络，或用 "
                                "ZHIPU_EVAL_IMAGE_MIRRORS 指定可用的镜像加速器。".format(
