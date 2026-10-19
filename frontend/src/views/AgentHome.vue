@@ -30,6 +30,18 @@ const savedAt = computed(() => {
   return t ? new Date(t * 1000).toLocaleString() : ''
 })
 const hasActive = computed(() => runs.value.some((r) => isActive(r.status)))
+// 任务选择方式：后端只认 limit/seed/tasks 三个字段，这里收敛成三种直观模式
+//   all    全部任务        -> limit=0
+//   random 随机抽取 N 个   -> limit=N + seed（0 = 每次启动都换一批）
+//   pick   手动勾选        -> tasks=勾选的任务名
+const MODES = [
+  { value: 'all', label: '全部任务' },
+  { value: 'random', label: '随机抽取' },
+  { value: 'pick', label: '手动勾选' },
+]
+const mode = ref('random')
+const picked = ref([])
+const filter = ref('')
 // 环境不可用时后端会直接拒绝启动，这里提前给出提示
 const envReady = computed(() => !!env.value.ok)
 const modelFree = computed(() => ['oracle', 'nop'].includes(form.agent))
@@ -37,6 +49,26 @@ const selectedDataset = computed(
   () => datasets.value.find((d) => (d.agent || {}).tasks_dir === form.data) || null,
 )
 const imageReady = computed(() => tasks.value.filter((t) => t.image_ready).length)
+const pickedSet = computed(() => new Set(picked.value))
+// 任务清单过滤：DeepSWE 有一百多个任务，手动勾选前需要能检索
+const visibleTasks = computed(() => {
+  const q = filter.value.trim().toLowerCase()
+  if (!q) return tasks.value
+  return tasks.value.filter((t) => [t.name, t.title, t.category, t.language]
+    .some((v) => String(v || '').toLowerCase().includes(q)))
+})
+const allPicked = computed(() => visibleTasks.value.length > 0
+  && visibleTasks.value.every((t) => pickedSet.value.has(t.name)))
+const modeText = computed(() => {
+  if (mode.value === 'all') return `将执行全部 ${taskTotal.value} 个任务`
+  if (mode.value === 'random') {
+    const n = Math.max(0, Number(form.limit) || 0)
+    if (!n) return `将执行全部 ${taskTotal.value} 个任务（不抽样）`
+    const seed = Number(form.seed) || 0
+    return `从 ${taskTotal.value} 个任务里随机抽 ${n} 个（${seed > 0 ? `种子 ${seed}，可复现` : '每次启动都换一批'}）`
+  }
+  return picked.value.length ? `已选 ${picked.value.length} 个任务` : '尚未勾选任务'
+})
 
 // agent 说明：mini-swe-agent 是被测对象，oracle/nop 用于自检评测链路
 const AGENT_TEXT = {
@@ -79,6 +111,11 @@ const applyDefaults = () => {
     timeout_multiplier: d.timeout_multiplier ?? 1,
     verifier_timeout_multiplier: d.verifier_timeout_multiplier ?? 1,
   })
+  // 恢复上次的模式：limit=0 视为「全部」，其余按「随机」回填。
+  // 「手动勾选」是一次性复现入口（后端也刻意不持久化 tasks），因此从不恢复。
+  mode.value = (d.limit ?? 1) === 0 ? 'all' : 'random'
+  picked.value = []
+  filter.value = ''
 }
 
 const loadEnv = async () => {
@@ -94,6 +131,7 @@ const loadTasks = async () => {
     const data = await api.agentTasks(form.data_custom || form.data)
     tasks.value = data.tasks || []
     taskTotal.value = tasks.value.length
+    picked.value = []                 // 换了任务集，旧勾选可能已不存在，直接清空
   } catch (e) {
     tasks.value = []
     taskTotal.value = 0
@@ -141,15 +179,68 @@ const saveConfig = async () => {
   }
 }
 
+const newSeed = () => Math.floor(Math.random() * 1e9) + 1
+
+const setMode = (value) => {
+  mode.value = value
+  if (value === 'pick') showTasks.value = true   // 勾选前先把清单露出来
+}
+
+const togglePick = (name) => {
+  if (mode.value !== 'pick') setMode('pick')     // 直接勾选即视为「手动选择」
+  const i = picked.value.indexOf(name)
+  if (i >= 0) picked.value.splice(i, 1)
+  else picked.value.push(name)
+}
+
+// 全选只作用于当前过滤结果，过滤后「全选」才符合直觉
+const togglePickAll = () => {
+  const names = visibleTasks.value.map((t) => t.name)
+  if (allPicked.value) picked.value = picked.value.filter((n) => !names.includes(n))
+  else picked.value = Array.from(new Set([...picked.value, ...names]))
+}
+
+const rerollSeed = () => {
+  form.seed = newSeed()
+  if (mode.value !== 'random') setMode('random')
+}
+
+const clearPicked = () => { picked.value = [] }
+
+// 把三种模式翻译成后端认的 limit/seed/tasks 三个字段
+const buildCfg = () => {
+  const cfg = { ...form, data: form.data_custom || form.data }
+  if (mode.value === 'all') {
+    cfg.limit = 0                 // 0 = 全部
+    cfg.seed = 0
+    cfg.tasks = ''
+  } else if (mode.value === 'random') {
+    cfg.limit = Math.max(0, Number(form.limit) || 0)
+    // limit=0 表示全部，后端不抽样，种子无意义；
+    // 否则 seed=0 在后端是「按目录顺序取前 N 个」，要随机必须给非零种子，
+    // 用户把种子留 0 时每次启动现场生成一个，即「每次换一批」
+    cfg.seed = cfg.limit > 0
+      ? (Number(form.seed) > 0 ? Number(form.seed) : newSeed())
+      : 0
+    cfg.tasks = ''
+  } else {
+    cfg.limit = picked.value.length
+    cfg.seed = 0
+    cfg.tasks = picked.value.join(',')
+  }
+  return cfg
+}
+
 const submit = async () => {
   error.value = ''
   notice.value = ''
+  if (mode.value === 'pick' && !picked.value.length) {
+    error.value = '手动勾选模式下请至少选择一个任务'
+    return
+  }
   submitting.value = true
   try {
-    const { run_id: runId } = await api.agentStart({
-      ...form,
-      data: form.data_custom || form.data,
-    })
+    const { run_id: runId } = await api.agentStart(buildCfg())
     router.push(`/agent/${runId}`)
   } catch (e) {
     error.value = e.message
@@ -282,14 +373,47 @@ onUnmounted(() => timer && clearInterval(timer))
         </div>
       </div>
       <div class="row mt">
+        <span class="muted">任务选择：</span>
+        <label
+          v-for="m in MODES"
+          :key="m.value"
+          style="display: inline-flex; gap: 6px; align-items: center; cursor: pointer"
+        >
+          <input v-model="mode" type="radio" :value="m.value" @change="setMode(m.value)" />
+          {{ m.label }}
+        </label>
+        <span class="muted">· {{ modeText }}</span>
+      </div>
+      <div class="row mt">
         <button class="btn sm" @click="showTasks = !showTasks">
           {{ showTasks ? '收起任务清单' : '查看任务清单' }}
         </button>
+        <template v-if="showTasks">
+          <input
+            v-model.trim="filter"
+            type="text"
+            placeholder="过滤：名称 / 标题 / 类别 / 语言"
+            style="max-width: 260px"
+          />
+          <span class="muted">
+            共 {{ tasks.length }} 个<template v-if="filter">，匹配 {{ visibleTasks.length }} 个</template>
+            · 已选 {{ picked.length }} 个
+          </span>
+          <button v-if="picked.length" class="btn sm" @click="clearPicked">清空选择</button>
+        </template>
       </div>
       <div v-if="showTasks" class="table-wrap mt">
-        <table v-if="tasks.length">
+        <table v-if="visibleTasks.length">
           <thead>
             <tr>
+              <th class="center" style="width: 34px">
+                <input
+                  type="checkbox"
+                  :checked="allPicked"
+                  title="全选当前筛选结果"
+                  @change="togglePickAll"
+                />
+              </th>
               <th>任务</th>
               <th>标题</th>
               <th>类别</th>
@@ -300,7 +424,10 @@ onUnmounted(() => timer && clearInterval(timer))
             </tr>
           </thead>
           <tbody>
-            <tr v-for="t in tasks" :key="t.name">
+            <tr v-for="t in visibleTasks" :key="t.name">
+              <td class="center">
+                <input type="checkbox" :checked="pickedSet.has(t.name)" @change="togglePick(t.name)" />
+              </td>
               <td class="mono clip" :title="t.path">{{ t.name }}</td>
               <td><span class="clip" :title="t.title">{{ t.title }}</span></td>
               <td>{{ t.category || '—' }}</td>
@@ -315,19 +442,31 @@ onUnmounted(() => timer && clearInterval(timer))
             </tr>
           </tbody>
         </table>
-        <div v-else class="empty">暂无任务（请检查任务集路径）</div>
+        <div v-else class="empty">
+          {{ tasks.length ? '没有匹配的任务，换个关键字试试' : '暂无任务（请检查任务集路径）' }}
+        </div>
       </div>
     </Card>
 
     <Card title="运行参数" nested>
       <div class="grid">
-        <div class="field">
-          <label>任务数（0 = 全部）</label>
-          <input v-model.number="form.limit" type="number" min="0" />
-        </div>
-        <div class="field">
-          <label>任务抽样种子（0 = 按目录顺序取前 N 个）</label>
-          <input v-model.number="form.seed" type="number" min="0" />
+        <template v-if="mode === 'random'">
+          <div class="field">
+            <label>随机抽取数量（0 = 全部）</label>
+            <input v-model.number="form.limit" type="number" min="0" />
+          </div>
+          <div class="field">
+            <label>随机种子（0 = 每次启动都换一批）</label>
+            <div class="row">
+              <input v-model.number="form.seed" type="number" min="0" style="max-width: 160px" />
+              <button class="btn sm" @click="rerollSeed">随机换一个</button>
+            </div>
+            <span class="tip">填非零值即可复现同一批任务</span>
+          </div>
+        </template>
+        <div v-else class="field span-2">
+          <label>任务范围</label>
+          <span class="tip">{{ modeText }}</span>
         </div>
         <div class="field">
           <label>并发任务数（每个任务一个容器）</label>
