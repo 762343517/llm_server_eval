@@ -624,6 +624,51 @@ def sample_tasks(catalogue, limit=0, seed=0):
     return list(catalogue)
 
 
+_SELECTION_CACHE = {}
+_SELECTION_LOCK = threading.Lock()
+
+
+def resolve_selection(cfg, use_cache=False):
+    """按运行配置解析本轮任务清单，返回 (任务目录, 目录清单, 选中任务)。
+
+    与 run_agent_eval 共用同一套选任务逻辑：子任务看板据此还原“还有哪些任务在等待”，
+    对没有把清单落盘的历史 run 同样有效。use_cache 仅供看板/日志这类高频只读接口使用，
+    实际执行始终按最新目录与镜像状态重新解析。
+    """
+    key = (str(cfg.get("data") or ""), str(cfg.get("tasks") or ""),
+           str(cfg.get("limit") or ""), str(cfg.get("seed") or ""))
+    if use_cache:
+        with _SELECTION_LOCK:
+            hit = _SELECTION_CACHE.get(key)
+        if hit:
+            return hit
+    directory = resolve_tasks_dir(cfg.get("data"))
+    if not directory or not os.path.isdir(directory):
+        raise RuntimeError("任务目录不存在: {}".format(directory or cfg.get("data") or "-"))
+    catalogue = list_tasks(directory)
+    if not catalogue:
+        raise RuntimeError("{} 下没有找到任务（任务目录需含 task.toml）".format(directory))
+    limit = _int(cfg.get("limit"), consts.DEFAULT_AGENT_N_TASKS)
+    wanted = str(cfg.get("tasks") or "").strip()
+    if wanted:
+        # 指定任务时按清单顺序执行，便于复现单个任务的问题
+        picked = {n.strip() for n in wanted.replace("\n", ",").split(",") if n.strip()}
+        selected = [t for t in catalogue if t["name"] in picked]
+        missing = sorted(picked - {t["name"] for t in catalogue})
+        if missing:
+            raise RuntimeError("任务不存在: {}".format(", ".join(missing[:5])))
+    else:
+        selected = sample_tasks(catalogue, limit,
+                                _int(cfg.get("seed"), consts.DEFAULT_AGENT_SEED))
+    result = (directory, catalogue, selected)
+    if use_cache:
+        with _SELECTION_LOCK:
+            if len(_SELECTION_CACHE) > 16:
+                _SELECTION_CACHE.clear()
+            _SELECTION_CACHE[key] = result
+    return result
+
+
 def _mask_argv(argv):
     """日志里遮盖密钥。"""
     return ["OPENAI_API_KEY=***" if arg.startswith("OPENAI_API_KEY=") else arg
@@ -850,6 +895,187 @@ def scan_trials(jobs_dir):
     return done, running
 
 
+# ---------------------------------------------------------------- 子任务看板
+# 逐任务结果表格要覆盖“还没跑完”的任务，因此状态只有四种：
+#   等待（清单里有、trial 目录还没建）
+#   运行中（trial 目录已建、没有 result.json）
+#   完成（正常结束，含判分未通过）
+#   异常退出（有 exception_info，额外带 failure_kind 分类）
+SUBTASK_STATE_TEXT = {
+    "waiting": "等待",
+    "running": "运行中",
+    "done": "完成",
+    "error": "异常退出",
+}
+# 运行中只有 agent 输出在持续增长，结束后才有 pier 自己写的 trial.log
+SUBTASK_LOG_CANDIDATES = ("agent/mini-swe-agent.txt", "trial.log")
+
+
+def trial_log_rel(trial_dir):
+    """trial 目录里最适合实时查看的日志（相对路径，取不到返回空串）。"""
+    for rel in SUBTASK_LOG_CANDIDATES:
+        if os.path.isfile(os.path.join(trial_dir, rel)):
+            return rel
+    return ""
+
+
+def _file_size(path):
+    try:
+        return os.path.getsize(path)
+    except OSError:
+        return 0
+
+
+def _trial_started(trial_dir):
+    """trial 开始时间：优先 config.json 的 mtime（pier 建目录时写一次就不再动）。
+
+    目录 ctime/mtime 会随容器写入产物不断刷新，不能用来算运行时长。
+    """
+    stamp = os.path.join(trial_dir, "config.json")
+    if os.path.isfile(stamp):
+        try:
+            return os.path.getmtime(stamp)
+        except OSError:
+            pass
+    try:
+        return os.path.getctime(trial_dir)
+    except OSError:
+        return None
+
+
+def find_trial_dir(cfg, out, task):
+    """按任务名定位 trial 目录（不构建整张看板，供日志轮询使用）。"""
+    task = str(task or "").strip()
+    if not task or "/" in task or "\\" in task or task.startswith("."):
+        return ""
+    job_dir = _job_dir(out)
+    try:
+        entries = os.listdir(job_dir)
+    except OSError:
+        return ""
+    for entry in entries:
+        path = os.path.join(job_dir, entry)
+        if not os.path.isdir(path):
+            continue
+        prefix = entry.split("__")[0]
+        if (entry == task or entry.startswith(task + "__") or prefix == task
+                or (prefix and task.startswith(prefix))):
+            return path
+    return ""
+
+
+def _job_dir(out):
+    """pier 的 job 目录：<run 目录>/pier/<run 目录名>。"""
+    run_root = os.path.dirname(os.path.abspath(out))
+    return os.path.join(run_root, "pier", os.path.basename(run_root))
+
+
+def read_log_slice(path, offset=-1, max_lines=200, max_bytes=256 * 1024):
+    """读一段日志：offset<0（或文件回退）从尾部回看，否则按 offset 增量读。
+
+    返回 {text, next, reset, size}；reset=True 表示调用方应先清空已有内容。
+    """
+    if not path or not os.path.isfile(path):
+        return {"text": "", "next": 0, "reset": True, "size": 0}
+    size = _file_size(path)
+    reset = offset is None or offset < 0 or offset > size
+    if reset:
+        # 首次/回退：只回看尾部 max_bytes，再取其中最后 max_lines 行
+        try:
+            with open(path, encoding="utf-8", errors="replace") as fh:
+                fh.seek(max(0, size - max_bytes))
+                if size > max_bytes:
+                    fh.readline()        # 丢掉被截断的半行
+                lines = [clean_log_line(line) for line in fh]
+        except OSError:
+            return {"text": "", "next": 0, "reset": True, "size": size}
+        lines = [line for line in lines if line][-max_lines:]
+        return {"text": "\n".join(lines), "next": size, "reset": True, "size": size}
+    lines = []
+    next_offset = offset
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            fh.seek(offset)
+            while len(lines) < max_lines:
+                line = fh.readline()
+                if not line:
+                    break
+                next_offset = fh.tell()
+                text = clean_log_line(line)
+                if text:
+                    lines.append(text)
+    except OSError:
+        return {"text": "", "next": 0, "reset": True, "size": size}
+    return {"text": "\n".join(lines), "next": next_offset, "reset": False, "size": size}
+
+
+def list_subtasks(cfg, out):
+    """子任务看板：计划清单 × pier 目录的实时状态。"""
+    _, catalogue, selected = resolve_selection(cfg, use_cache=True)
+    meta_by_name = {t["name"]: t for t in catalogue}
+    job_dir = _job_dir(out)
+    finished, running = scan_trials(job_dir)
+
+    done_by_task = {}
+    for trial, path in finished:
+        name = trial_task(trial, meta_by_name)
+        record = trial_record(path, _read_json(os.path.join(path, "result.json")) or {},
+                              meta_by_name.get(name))
+        record["verifier_tail"] = verifier_tail(path)
+        record["task_id"] = record["task"]
+        record.pop("problem", None)      # 任务全文不进列表，详情里另看
+        done_by_task[name] = record
+    run_by_task = {trial_task(trial, meta_by_name): os.path.join(job_dir, trial)
+                   for trial in running}
+
+    now = time.time()
+    rows = []
+    for index, task in enumerate(selected, 1):
+        name = task["name"]
+        row = {
+            "index": index, "original_index": index,
+            "task": name, "task_id": name,
+            "title": task.get("title") or name,
+            "category": task.get("category", ""),
+            "language": task.get("language", ""),
+            "state": "waiting", "state_text": SUBTASK_STATE_TEXT["waiting"],
+            "status": "waiting", "result_text": "",
+            "reward": None, "steps": None,
+            "input_tokens": 0, "output_tokens": 0, "cache_tokens": 0,
+            "elapsed_s": None, "started_at": None, "finished": False,
+            "error": "", "verifier_tail": "", "trial": "", "trial_dir": "",
+            "has_patch": False, "log_rel": "", "log_size": 0,
+            "failure_kind": "", "failure_kind_text": "", "failure_type": "",
+        }
+        record = done_by_task.get(name)
+        path = run_by_task.get(name)
+        if record:
+            row.update({key: record.get(key) for key in (
+                "status", "reward", "steps", "input_tokens", "output_tokens",
+                "cache_tokens", "peak_context_tokens", "elapsed_s", "error",
+                "trial", "trial_dir", "has_patch", "verifier_tail",
+                "failure_kind", "failure_kind_text", "failure_type")})
+            row["finished"] = True
+            row["state"] = "error" if record["status"] == "error" else "done"
+            row["state_text"] = SUBTASK_STATE_TEXT[row["state"]]
+            row["result_text"] = {"resolved": "通过",
+                                  "unresolved": "未通过"}.get(record["status"], "")
+        elif path:
+            started = _trial_started(path)
+            row.update({
+                "state": "running", "state_text": SUBTASK_STATE_TEXT["running"],
+                "status": "running", "trial_dir": path,
+                "trial": os.path.basename(path), "started_at": started,
+                "elapsed_s": round(max(0.0, now - started), 1) if started else None,
+            })
+        if row["trial_dir"]:
+            row["log_rel"] = trial_log_rel(row["trial_dir"])
+            if row["log_rel"]:
+                row["log_size"] = _file_size(os.path.join(row["trial_dir"], row["log_rel"]))
+        rows.append(row)
+    return rows
+
+
 def _group(records, key):
     """按字段分组统计（通过率），供汇总展示。"""
     out = {}
@@ -983,25 +1209,8 @@ def run_agent_eval(cfg, on_event=None, should_stop=None):
     if not patched:
         on_event("task_log", {"msg": "[警告] egress 代理端口未适配：{}".format(note)})
 
-    directory = resolve_tasks_dir(cfg.get("data"))
-    if not directory or not os.path.isdir(directory):
-        raise RuntimeError("任务目录不存在: {}".format(directory or cfg.get("data") or "-"))
     refresh_images()                  # 上一轮 run 可能刚把镜像 tag 撤掉，这里取实时快照
-    catalogue = list_tasks(directory)
-    if not catalogue:
-        raise RuntimeError("{} 下没有找到任务（任务目录需含 task.toml）".format(directory))
-    limit = _int(cfg.get("limit"), consts.DEFAULT_AGENT_N_TASKS)
-    wanted = str(cfg.get("tasks") or "").strip()
-    if wanted:
-        # 指定任务时按清单顺序执行，便于复现单个任务的问题
-        picked = {n.strip() for n in wanted.replace("\n", ",").split(",") if n.strip()}
-        selected = [t for t in catalogue if t["name"] in picked]
-        missing = sorted(picked - {t["name"] for t in catalogue})
-        if missing:
-            raise RuntimeError("任务不存在: {}".format(", ".join(missing[:5])))
-    else:
-        selected = sample_tasks(catalogue, limit,
-                                _int(cfg.get("seed"), consts.DEFAULT_AGENT_SEED))
+    directory, catalogue, selected = resolve_selection(cfg)
     meta_by_name = {t["name"]: t for t in catalogue}
 
     run_root = os.path.dirname(os.path.abspath(out))

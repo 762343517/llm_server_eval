@@ -83,6 +83,11 @@ export const api = {
   agentRun: (id) => request(`/api/agent/runs/${encodeURIComponent(id)}`),
   agentItems: (id, { limit = 200, status = '', kind = '', q = '' } = {}) =>
     request(`/api/agent/runs/${encodeURIComponent(id)}/items${query({ limit, status, kind, q })}`),
+  // 子任务看板：等待 / 运行中 / 完成 / 异常退出
+  agentSubtasks: (id) => request(`/api/agent/runs/${encodeURIComponent(id)}/subtasks`),
+  // 子任务日志：offset<0 取尾部，之后用返回的 next 增量拉取
+  agentTaskLog: (id, task, offset = -1) =>
+    request(`/api/agent/runs/${encodeURIComponent(id)}/tasklog${query({ task, offset })}`),
   // 任务产物直链：测试输出 / 模型补丁 / 任务说明（内联文本预览，download=1 触发下载）
   agentFileUrl: (id, path, { download = false } = {}) =>
     `/api/agent/runs/${encodeURIComponent(id)}/file${query({ path, download: download ? 1 : '' })}`,

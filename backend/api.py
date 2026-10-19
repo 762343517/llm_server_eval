@@ -788,6 +788,39 @@ def agent_items(run_id: str, limit: int = 500, status: str = "", kind: str = "",
     return JSONResponse({"total": len(rows), "items": rows[:limit]})
 
 
+@app.get("/api/agent/runs/{run_id}/subtasks")
+def agent_subtasks(run_id: str):
+    """子任务看板：等待 / 运行中 / 完成 / 异常退出（异常退出带失败原因分类）。"""
+    snap = agent.get(_valid_run_id(run_id))
+    if not snap:
+        raise HTTPException(404, "任务不存在")
+    rows = agent_core.list_subtasks(snap.get("cfg") or {}, agent.out_base(run_id))
+    counts = {key: 0 for key in agent_core.SUBTASK_STATE_TEXT}
+    for row in rows:
+        counts[row["state"]] = counts.get(row["state"], 0) + 1
+    return JSONResponse({"total": len(rows), "items": rows, "counts": counts})
+
+
+@app.get("/api/agent/runs/{run_id}/tasklog")
+def agent_tasklog(run_id: str, task: str = "", offset: int = -1):
+    """子任务实时日志：offset<0 取尾部，之后用返回的 next 增量拉取。"""
+    snap = agent.get(_valid_run_id(run_id))
+    if not snap:
+        raise HTTPException(404, "任务不存在")
+    trial_dir = agent_core.find_trial_dir(snap.get("cfg") or {},
+                                          agent.out_base(run_id), task)
+    if not trial_dir:
+        raise HTTPException(404, "任务尚未开始或产物已清理: " + (task or "-"))
+    rel = agent_core.trial_log_rel(trial_dir)
+    if not rel:
+        return JSONResponse({"text": "", "next": 0, "reset": True, "size": 0,
+                             "trial": os.path.basename(trial_dir), "log_rel": ""})
+    data = agent_core.read_log_slice(os.path.join(trial_dir, rel), offset)
+    data["trial"] = os.path.basename(trial_dir)
+    data["log_rel"] = rel
+    return JSONResponse(data)
+
+
 @app.post("/api/agent/runs/{run_id}/stop")
 def agent_stop(run_id: str):
     if not agent.stop(_valid_run_id(run_id)):

@@ -264,6 +264,11 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 td.center, th.center { text-align: center; }
 .table-wrap .clip { max-width: 420px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .table-wrap.tall { max-height: 760px; }
+/* 逐任务结果：整行可点开详情与实时日志 */
+tbody tr.clickable { cursor: pointer; }
+tbody tr.detail-row { background: #fbfcfe; }
+tbody tr.detail-row:hover { background: #fbfcfe; }
+tbody tr.detail-row > td { padding: 12px 14px; }
 
 /* 固定列宽：列宽由 colgroup 指定，内容超出列宽时换行而非省略号截断 */
 .table-wrap.fixed table { table-layout: fixed; }

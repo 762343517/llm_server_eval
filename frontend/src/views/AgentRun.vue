@@ -10,13 +10,18 @@ const router = useRouter()
 const runId = route.params.id
 
 const snap = ref(null)
-const items = ref([])
-const itemTotal = ref(0)
+// 子任务看板：等待 / 运行中 / 完成 / 异常退出（含失败原因分类）
+const subtasks = ref([])
+const subCounts = ref({})
+const openTask = ref('')          // 当前展开详情的子任务
+const taskLogs = ref([])          // 展开子任务的实时日志（累积）
+const logOffset = ref(-1)         // 日志增量偏移，-1 表示从尾部开始
 const error = ref('')
 const busy = ref(false)
-const filters = ref({ status: '', kind: '', q: '', limit: 200 })
+const filters = ref({ state: '', kind: '', q: '', limit: 200 })
 let timer = null
 let tick = 0
+let logBusy = false
 
 const running = computed(() => isRunning(snap.value && snap.value.status))
 // 排队中同样要保持轮询：等本任务开跑后页面自动切到实时进度
@@ -45,13 +50,20 @@ const cfgRows = computed(() => {
   ]
 })
 
-// 判定结果来自后端归一化后的 status（resolved / unresolved / error）
+// 子任务状态由后端归一化：waiting / running / done / error
+const STATE_TEXT = { waiting: '等待', running: '运行中', done: '完成', error: '异常退出' }
 const rowClass = (row) => {
-  if (row.status === 'resolved') return 'row-ok'
-  if (row.status === 'error') return 'row-bad'
+  if (row.state === 'error') return 'row-bad'
+  if (row.state === 'done') return row.status === 'resolved' ? 'row-ok' : 'row-warn'
   return ''
 }
-const STATUS_TEXT = { resolved: '通过', unresolved: '未通过', error: '异常' }
+const badgeClass = (row) => ({
+  ok: row.state === 'done' && row.status === 'resolved',
+  warn: row.state === 'done' && row.status !== 'resolved',
+  bad: row.state === 'error',
+  busy: row.state === 'running',
+  off: row.state === 'waiting',
+})
 // 失败原因分类（后端 failure_kind），用于筛选与表格标注
 const KIND_TEXT = {
   timeout: '超时异常',
@@ -61,18 +73,63 @@ const KIND_TEXT = {
   unknown: '未分类异常',
 }
 
-const statusOptions = computed(() => [...new Set(items.value.map((i) => i.status).filter(Boolean))])
-const kindOptions = computed(() => [...new Set(items.value.map((i) => i.failure_kind).filter(Boolean))])
-// 汇总优先用后端统计；旧 run 缺该字段时按当前已加载条目兜底
+const stateOptions = computed(() =>
+  [...new Set(subtasks.value.map((r) => r.state).filter(Boolean))])
+const kindOptions = computed(() =>
+  [...new Set(subtasks.value.map((r) => r.failure_kind).filter(Boolean))])
+// 汇总优先用后端统计；旧 run 缺该字段时按子任务列表兜底
 const kindRows = computed(() => {
   const fromSummary = summary.value.by_failure_kind
   if (Array.isArray(fromSummary) && fromSummary.length) return fromSummary
   const counts = {}
-  for (const row of items.value) {
+  for (const row of subtasks.value) {
     if (row.failure_kind) counts[row.failure_kind] = (counts[row.failure_kind] || 0) + 1
   }
   return Object.entries(KIND_TEXT).map(([kind, text]) => ({ kind, text, count: counts[kind] || 0 }))
 })
+
+const visibleTasks = computed(() => {
+  let rows = subtasks.value
+  if (filters.value.state) rows = rows.filter((r) => r.state === filters.value.state)
+  if (filters.value.kind) rows = rows.filter((r) => r.failure_kind === filters.value.kind)
+  const needle = String(filters.value.q || '').trim().toLowerCase()
+  if (needle) {
+    rows = rows.filter((r) => [r.task, r.title, r.category, r.error,
+      r.failure_kind_text, r.failure_type]
+      .some((v) => String(v || '').toLowerCase().includes(needle)))
+  }
+  return rows.slice(0, filters.value.limit)
+})
+
+const detailRows = (row) => {
+  const text = (v) => (v === null || v === undefined || v === '' ? '—' : String(v))
+  return [
+    { k: '任务', v: row.task },
+    { k: '标题', v: text(row.title) },
+    { k: '类别', v: text(row.category) },
+    { k: '状态', v: row.state_text },
+    { k: '结果', v: text(row.result_text) },
+    {
+      k: '失败原因',
+      v: row.state === 'error'
+        ? `${row.failure_kind_text || '未分类异常'}${row.failure_type ? `（${row.failure_type}）` : ''}`
+        : '—',
+    },
+    { k: 'reward', v: text(row.reward) },
+    { k: '步数', v: text(row.steps) },
+    {
+      k: '耗时',
+      v: row.elapsed_s === null || row.elapsed_s === undefined ? '—' : duration(row.elapsed_s),
+    },
+    {
+      k: 'token（入/出/缓存）',
+      v: `${int(row.input_tokens)} / ${int(row.output_tokens)} / ${int(row.cache_tokens)}`,
+    },
+    { k: '异常信息', v: text(row.error) },
+    { k: '判定输出', v: text(row.verifier_tail) },
+    { k: '产物目录', v: text(row.trial_dir) },
+  ]
+}
 
 // 产物：测试输出 / 模型补丁 / 任务日志（后端只允许读取该任务目录内的文件）
 const artifactUrl = (row, rel) =>
@@ -81,14 +138,53 @@ const artifactUrl = (row, rel) =>
 const groupRows = (group) =>
   Object.entries(group || {}).map(([k, v]) => [k, v])
 
-const loadItems = async () => {
+const loadSubtasks = async () => {
   try {
-    const data = await api.agentItems(runId, filters.value)
-    items.value = data.items || []
-    itemTotal.value = data.total || 0
+    const data = await api.agentSubtasks(runId)
+    subtasks.value = data.items || []
+    subCounts.value = data.counts || {}
   } catch (e) {
     error.value = e.message
   }
+}
+
+const resetTaskLog = () => {
+  taskLogs.value = []
+  logOffset.value = -1
+}
+
+// 首次取日志尾部，之后按 offset 增量追加；等待中的任务还没有日志，静默跳过
+const pullTaskLog = async (reset = false) => {
+  const task = openTask.value
+  if (!task || logBusy) return
+  if (reset) resetTaskLog()
+  logBusy = true
+  try {
+    const data = await api.agentTaskLog(runId, task, logOffset.value)
+    if (openTask.value !== task) return
+    if (data.reset) taskLogs.value = []
+    const lines = String(data.text || '').split('\n').filter((x) => x)
+    if (lines.length) {
+      taskLogs.value = [...taskLogs.value, ...lines.map((msg) => ({ t: '', msg }))]
+        .slice(-1500)
+    }
+    logOffset.value = data.next || 0
+  } catch (e) {
+    // 任务尚未开始或产物已清理：保留已有内容即可
+  } finally {
+    logBusy = false
+  }
+}
+
+const toggleTask = async (row) => {
+  if (openTask.value === row.task) {
+    openTask.value = ''
+    resetTaskLog()
+    return
+  }
+  openTask.value = row.task
+  resetTaskLog()
+  await pullTaskLog(true)
 }
 
 const loadSnap = async () => {
@@ -103,7 +199,9 @@ const loadSnap = async () => {
 const tickLoop = async () => {
   tick += 1
   await loadSnap()
-  if (tick % 5 === 0 || !running.value) await loadItems()
+  // 子任务状态每 2s 刷新一次；全部结束后只需低频兜底
+  if (tick % 2 === 1 || !running.value) await loadSubtasks()
+  await pullTaskLog()
 }
 
 const stopRun = async () => {
@@ -133,12 +231,14 @@ const deleteRun = async () => {
 
 onMounted(async () => {
   await loadSnap()
-  await loadItems()
+  await loadSubtasks()
   timer = setInterval(() => {
     if (active.value) tickLoop()
   }, 2000)
 })
-onUnmounted(() => timer && clearInterval(timer))
+onUnmounted(() => {
+  if (timer) clearInterval(timer)
+})
 </script>
 
 <template>
@@ -219,90 +319,99 @@ onUnmounted(() => timer && clearInterval(timer))
 
   <Card title="逐任务结果">
     <p class="hint">
-      共 {{ itemTotal }} 条{{ running ? '（任务运行中，每 10 秒自动刷新）' : '' }} ·
-      产物列可打开容器内的测试输出与模型补丁
+      共 {{ subtasks.length }} 个子任务
+      <span v-if="subCounts.running"> · 运行中 {{ subCounts.running }}</span>
+      <span v-if="subCounts.waiting"> · 等待 {{ subCounts.waiting }}</span>
+      {{ running ? ' · 状态每 2 秒自动刷新' : '' }} ·
+      点击任务行可查看详情、实时日志与产物
     </p>
     <div class="filters">
-      <select v-model="filters.status" @change="loadItems">
-        <option value="">全部结果</option>
-        <option v-for="s in statusOptions" :key="s" :value="s">{{ STATUS_TEXT[s] || s }}</option>
+      <select v-model="filters.state">
+        <option value="">全部状态</option>
+        <option v-for="s in stateOptions" :key="s" :value="s">{{ STATE_TEXT[s] || s }}</option>
       </select>
-      <select v-model="filters.kind" @change="loadItems">
+      <select v-model="filters.kind">
         <option value="">全部失败原因</option>
         <option v-for="k in kindOptions" :key="k" :value="k">{{ KIND_TEXT[k] || k }}</option>
       </select>
-      <input v-model.trim="filters.q" type="text" placeholder="搜索任务名 / 说明 / 异常" @keyup.enter="loadItems" />
-      <select v-model.number="filters.limit" @change="loadItems">
+      <input v-model.trim="filters.q" type="text" placeholder="搜索任务名 / 说明 / 异常" />
+      <select v-model.number="filters.limit">
         <option :value="100">显示 100 条</option>
         <option :value="200">显示 200 条</option>
         <option :value="500">显示 500 条</option>
       </select>
-      <button class="btn sm" @click="loadItems">查询</button>
+      <button class="btn sm" @click="loadSubtasks">刷新</button>
     </div>
 
-    <div v-if="!items.length" class="empty">暂无逐任务结果</div>
+    <div v-if="!subtasks.length" class="empty">暂无子任务</div>
     <div v-else class="table-wrap tall fixed">
       <table>
         <colgroup>
           <col style="width: 60px" />
-          <col style="width: 200px" />
-          <col style="width: 260px" />
-          <col style="width: 90px" />
+          <col style="width: 210px" />
+          <col style="width: 250px" />
           <col style="width: 110px" />
+          <col style="width: 100px" />
+          <col style="width: 80px" />
           <col style="width: 70px" />
-          <col style="width: 110px" />
+          <col style="width: 120px" />
           <col style="width: 90px" />
-          <col style="width: 240px" />
-          <col style="width: 240px" />
         </colgroup>
         <thead>
           <tr>
             <th class="num">序号</th>
             <th>任务</th>
             <th>标题</th>
-            <th class="center">结果</th>
+            <th class="center">状态</th>
+            <th class="center">失败原因</th>
             <th class="num">reward</th>
             <th class="num">步数</th>
             <th class="num">token(入/出)</th>
             <th class="num">耗时s</th>
-            <th>产物</th>
-            <th>异常 / 说明</th>
           </tr>
         </thead>
         <tbody>
-          <tr v-for="(row, i) in items" :key="i" :class="rowClass(row)">
-            <td class="num">{{ row.original_index }}</td>
-            <td class="mono clip" :title="row.trial">{{ row.task }}</td>
-            <td><span class="clip" :title="row.problem || row.title">{{ row.title }}</span></td>
-            <td class="center">
-              <span class="badge" :class="{ ok: row.status === 'resolved', bad: row.status === 'error' }">
-                {{ STATUS_TEXT[row.status] || row.status }}
-              </span>
-              <div v-if="row.failure_kind_text" class="muted">{{ row.failure_kind_text }}</div>
-              <div class="muted">{{ row.category || '' }}</div>
-            </td>
-            <td class="num">{{ row.reward === null || row.reward === undefined ? '—' : shortFixed(row.reward, 3) }}</td>
-            <td class="num">{{ int(row.steps) }}</td>
-            <td class="num">{{ compact(row.input_tokens) }} / {{ compact(row.output_tokens) }}</td>
-            <td class="num">{{ row.elapsed_s === null || row.elapsed_s === undefined ? '—' : shortFixed(row.elapsed_s) }}</td>
-            <td>
-              <div class="row">
-                <a class="btn sm" :href="artifactUrl(row, 'verifier/test-stdout.txt')" target="_blank">测试输出</a>
-                <a v-if="row.has_patch" class="btn sm" :href="artifactUrl(row, 'artifacts/model.patch')" target="_blank">补丁</a>
-                <a class="btn sm" :href="artifactUrl(row, 'trial.log')" target="_blank">日志</a>
-              </div>
-            </td>
-            <td>
-              <span v-if="row.error" class="clip" :title="row.error">
-                <span v-if="row.failure_kind_text" class="muted">[{{ row.failure_kind_text }}]</span>
-                {{ row.error }}
-              </span>
-              <span v-else-if="row.verifier_tail" class="clip" :title="row.verifier_tail">
-                {{ row.verifier_tail }}
-              </span>
-              <span v-else class="clip" :title="row.problem">{{ row.problem }}</span>
-            </td>
-          </tr>
+          <template v-for="row in visibleTasks" :key="row.task">
+            <tr class="clickable" :class="rowClass(row)" @click="toggleTask(row)">
+              <td class="num">{{ row.index }}</td>
+              <td class="mono clip" :title="row.trial || row.task">{{ row.task }}</td>
+              <td><span class="clip" :title="row.title">{{ row.title }}</span></td>
+              <td class="center">
+                <span class="badge" :class="badgeClass(row)">{{ row.state_text }}</span>
+                <div v-if="row.result_text" class="muted">{{ row.result_text }}</div>
+                <div v-else-if="row.state === 'running'" class="muted">
+                  已跑 {{ row.elapsed_s === null || row.elapsed_s === undefined ? '—' : duration(row.elapsed_s) }}
+                </div>
+              </td>
+              <td class="center">
+                <span v-if="row.state === 'error' && row.failure_kind_text"
+                      class="badge bad" :title="row.error">{{ row.failure_kind_text }}</span>
+                <span v-else class="muted">—</span>
+              </td>
+              <td class="num">{{ row.reward === null || row.reward === undefined ? '—' : shortFixed(row.reward, 3) }}</td>
+              <td class="num">{{ row.steps === null || row.steps === undefined ? '—' : int(row.steps) }}</td>
+              <td class="num">{{ compact(row.input_tokens) }} / {{ compact(row.output_tokens) }}</td>
+              <td class="num">{{ row.elapsed_s === null || row.elapsed_s === undefined ? '—' : shortFixed(row.elapsed_s) }}</td>
+            </tr>
+            <tr v-if="openTask === row.task" class="detail-row">
+              <td colspan="9">
+                <KvList :items="detailRows(row)" />
+                <div class="row mt">
+                  <a v-if="row.trial_dir" class="btn sm" :href="artifactUrl(row, 'verifier/test-stdout.txt')" target="_blank">测试输出</a>
+                  <a v-if="row.has_patch" class="btn sm" :href="artifactUrl(row, 'artifacts/model.patch')" target="_blank">补丁</a>
+                  <a v-if="row.trial_dir" class="btn sm" :href="artifactUrl(row, 'trial.log')" target="_blank">trial.log</a>
+                  <a v-if="row.trial_dir" class="btn sm" :href="artifactUrl(row, 'instruction.md')" target="_blank">任务说明</a>
+                </div>
+                <div class="mt">
+                  <div class="muted">
+                    实时日志 <span class="mono">{{ row.log_rel || '（尚未产生）' }}</span>
+                    <span v-if="row.log_size"> · {{ compact(row.log_size) }} B</span>
+                  </div>
+                  <LogPanel :logs="taskLogs" />
+                </div>
+              </td>
+            </tr>
+          </template>
         </tbody>
       </table>
     </div>
