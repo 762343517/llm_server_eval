@@ -33,10 +33,12 @@ import eval_core      # noqa: E402
 import perf_core      # noqa: E402
 import perf_manager   # noqa: E402
 import run_manager    # noqa: E402
+import runtime_paths  # noqa: E402
 import task_queue     # noqa: E402
 import utils          # noqa: E402
 
-WEBUI_DIR = os.path.join(BASE_DIR, "webui")
+# 打包后前端产物在解包目录，开发态在 backend/webui
+WEBUI_DIR = runtime_paths.webui_dir()
 
 accuracy = run_manager.RunManager()
 stress = perf_manager.StressManager()

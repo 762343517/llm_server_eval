@@ -56,6 +56,20 @@ python3 backend/simpleqa_eval.py --data dataset/HLE/test-00000-of-00001.parquet 
     --model GLM-5.2-zhipu --judge-model DeepSeek-V4-Flash-0731 --out results/hle
 ```
 
+## 打包分发（免安装）
+
+把服务打成单文件可执行（内置 Python 运行时与前端产物），目标机器无需 Python/pip/Node：
+
+```bash
+./packaging/build.sh                 # 前端构建 + PyInstaller + 组装 + tar.gz
+./packaging/build.sh --no-data       # 只打包程序，数据集另行准备
+```
+
+产物：`dist/zhipu-eval-linux-x86_64-<日期>.tar.gz`，解压后 `./start.sh` 即可启动。
+数据目录 `dataset/`、`model/`、`runs/` 与可执行文件同级（可用 `APP_ROOT` 覆盖），
+路径基准统一由 `backend/runtime_paths.py` 提供：开发态指向项目根，打包后指向可执行文件
+所在目录，因此启动时的工作目录不再影响数据落盘位置。
+
 ## 全局任务队列
 
 精度测试与压力测试共用一条串行队列（`backend/task_queue.py`）：提交后任务先入队，由单一

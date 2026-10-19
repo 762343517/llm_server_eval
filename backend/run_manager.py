@@ -18,10 +18,12 @@ import threading
 import time
 
 import eval_core
+import runtime_paths
 import task_queue
 import utils
 
-RUNS_DIR = os.environ.get("RUNS_DIR", "runs")
+# 默认落在数据根下（开发态为项目根，打包后为可执行文件旁），避免依赖启动时的 CWD
+RUNS_DIR = os.environ.get("RUNS_DIR") or os.path.join(runtime_paths.app_root(), "runs")
 
 # run_id 直接参与路径拼接（删除时会执行 rmtree），必须拦截 ".." 等越权名称
 _RUN_ID_RE = re.compile(r"^(?!.*\.\.)[0-9A-Za-z][0-9A-Za-z._-]{0,63}$")

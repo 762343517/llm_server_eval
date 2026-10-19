@@ -7,8 +7,11 @@ import os
 
 from fastapi import HTTPException
 
+import runtime_paths
+
+# 允许预览的范围限定在数据根（开发态为项目根，打包后为可执行文件目录）
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-WORKSPACE_ROOT = os.path.realpath(os.path.join(BASE_DIR, os.pardir))
+WORKSPACE_ROOT = os.path.realpath(runtime_paths.app_root())
 CSV_DEFAULT_LIMIT = 500
 CSV_MAX_LIMIT = 5000
 

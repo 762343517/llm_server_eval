@@ -12,8 +12,12 @@
 
 import os
 
-# 分词器根目录：固定为项目仓库内的 model/ 目录，页面的分词器下拉框只从这里列候选
-PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+import runtime_paths
+
+# 数据根目录：开发态为项目根，打包后为可执行文件所在目录（可用 APP_ROOT 覆盖）
+PROJECT_ROOT = runtime_paths.app_root()
+
+# 分词器根目录：固定为数据根下的 model/ 目录，页面的分词器下拉框只从这里列候选
 MODEL_DIR = os.path.join(PROJECT_ROOT, "model")
 
 # 数据集根目录：每个数据集以「名称」为顶级目录放在这里，清单见 dataset/datasets.json
