@@ -15,6 +15,7 @@ import argparse
 import csv
 import os
 import sys
+import threading
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException
@@ -52,6 +53,10 @@ agent = run_manager.RunManager(
 
 @asynccontextmanager
 async def lifespan(_app):
+    # 上次进程被强杀时，agent 评测来不及回收容器：后台兜底清理已结束 run 的残留，
+    # 不阻塞启动（只处理终态 run，正在跑的 run 的容器不受影响）
+    threading.Thread(target=agent_core.reclaim_orphans, args=(agent.runs_dir,),
+                     name="reclaim-orphans", daemon=True).start()
     try:
         yield
     finally:

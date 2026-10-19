@@ -141,6 +141,19 @@ python3 backend/simpleqa_eval.py --data dataset/HLE/test-00000-of-00001.parquet 
 以 OpenAI 多模态格式发送（`image_url` + base64 data-url），图片不写入逐题记录，
 仅记录 `has_image` 标记。
 
+### 容器回收
+
+pier 正常跑完会自己 `docker compose down --rmi all`；但被中断（点停止、后端重启、
+进程被 SIGKILL、pier 崩溃）时来不及执行，任务容器与 egress 代理会一直 Up。为此有三层
+兜底，按 compose 的 `com.docker.compose.project` label 依次回收容器 → 网络 → 卷：
+
+1. 每轮 run 结束（含停止）在 `run_agent_eval` 的 finally 里回收本轮 job 的全部 trial；
+2. 服务启动时后台扫描 `runs/agent/*/pier/`，回收历史 run 的残留；
+3. 判定「是否有主」不看快照状态（被 SIGKILL 的 run 会一直写着 running），而是看
+   `ps` 里是否还有 `pier ... --job-name <run_id>` 进程，避免误清别的部署正在跑的任务。
+
+回收不删镜像 tag（与 pier 的 `--rmi all` 不同），下一轮可直接复用，省一次 pull。
+
 ## 判定与计分口径
 
 - 裁判请求不指定 `max_tokens`，上限由服务端默认参数决定（思考与判定正文共享该预算）。

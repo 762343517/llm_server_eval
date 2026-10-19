@@ -1180,6 +1180,119 @@ def _terminate(proc, grace=25.0):
             continue
 
 
+# ---------------------------------------------------------------- 容器回收
+# pier 正常跑完会自己 `docker compose down --rmi all`；但被中断（点停止、SIGKILL、
+# pier 崩溃、后端重启）时来不及清理，任务容器与 egress 代理会一直 Up，白占 CPU/内存/
+# 网络。这里按 compose 的 project label 兜底回收：不依赖 compose 文件，也不再撤镜像
+# tag（保留 tag 反而省掉下一轮的重新 pull）。
+_COMPOSE_PROJECT_LABEL = "com.docker.compose.project"
+_PROJECT_FMT = '|{{.Label "com.docker.compose.project"}}'
+
+# 删除顺序固定为 容器 -> 网络 -> 卷：网络/卷被容器占用时删不掉。
+# docker volume ls 没有 .ID 字段，卷要用 .Name（两者同值，但模板用错会渲染成空串）
+_RECLAIM_STEPS = (
+    ("container", ["docker", "ps", "-a"], ["docker", "rm", "-f"], "{{.ID}}"),
+    ("network", ["docker", "network", "ls"], ["docker", "network", "rm"], "{{.ID}}"),
+    ("volume", ["docker", "volume", "ls"], ["docker", "volume", "rm", "-f"], "{{.Name}}"),
+)
+
+
+def _docker(argv, timeout=120):
+    """按当前 docker 权限模式（直连 / sg docker）执行命令，返回 (rc, 输出)。"""
+    return _run(wrap_argv(argv, docker_state()["mode"]), timeout=timeout)
+
+
+def compose_projects(job_dir):
+    """pier job 目录下每个 trial 对应的 compose project 名（compose 会小写化名字）。"""
+    try:
+        names = os.listdir(job_dir)
+    except OSError:
+        return []
+    return sorted({n.lower() for n in names if os.path.isdir(os.path.join(job_dir, n))})
+
+
+def cleanup_projects(projects, on_event=None):
+    """回收指定 compose project 的容器/网络/卷，返回各类删除数量。
+
+    一次列出所有带 compose project label 的资源再按归属过滤，避免逐 project 反复调
+    docker；正常跑完的 run 没有残留，调用退化为 3 次 list。
+    """
+    targets = {p for p in projects if p}
+    counts = {"container": 0, "network": 0, "volume": 0}
+    if not targets:
+        return counts
+    for kind, list_argv, remove_argv, fmt in _RECLAIM_STEPS:
+        rc, out = _docker(list_argv + ["--filter", "label=" + _COMPOSE_PROJECT_LABEL,
+                                       "--format", fmt + _PROJECT_FMT])
+        if rc != 0:
+            continue
+        ids = []
+        for line in out.splitlines():
+            name, _, project = line.partition("|")
+            if name.strip() and project.strip() in targets:
+                ids.append(name.strip())
+        if not ids:
+            continue
+        rc, err = _docker(remove_argv + ids)
+        if rc == 0:
+            counts[kind] = len(ids)
+        elif on_event:
+            on_event("task_log", {"msg": "[回收] {} 删除失败：{}".format(
+                kind, _last_line(err))})
+    if any(counts.values()) and on_event:
+        on_event("task_log", {"msg": "[回收] 清理残留容器 {} 个、网络 {} 个、卷 {} 个".format(
+            counts["container"], counts["network"], counts["volume"])})
+    return counts
+
+
+def reclaim_job_containers(job_dir, on_event=None):
+    """回收本轮 run 的容器残留；pier 已自行 down 时是空操作。"""
+    return cleanup_projects(compose_projects(job_dir), on_event)
+
+
+def active_pier_jobs():
+    """当前机器上正在运行的 pier job 名集合（pier 的 --job-name 即 run_id）。"""
+    rc, out = _run(["ps", "-eo", "args"], timeout=10)
+    if rc != 0:
+        return set()
+    jobs = set()
+    for line in out.splitlines():
+        if "pier" not in line or "--job-name" not in line:
+            continue
+        parts = line.split()
+        for i, part in enumerate(parts):
+            if part == "--job-name" and i + 1 < len(parts):
+                jobs.add(parts[i + 1])
+    return jobs
+
+
+def reclaim_orphans(runs_dir, on_event=None):
+    """回收历史 run 遗留的容器（服务启动时兜底）。
+
+    判据是「机器上没有对应的 pier 进程」而不是快照状态：进程被 SIGKILL 时 meta.json
+    可能仍写着 running，只看快照会永远跳过这些残留；反之正在跑的 run 在 ps 里一定能
+    看到 --job-name，据此避免误清别的部署正在执行的任务。
+    """
+    counts = {"container": 0, "network": 0, "volume": 0}
+    try:
+        run_ids = os.listdir(runs_dir)
+    except OSError:
+        return counts
+    running = active_pier_jobs()
+    projects = []
+    for run_id in run_ids:
+        if run_id in running:
+            continue
+        pier_root = os.path.join(runs_dir, run_id, "pier")
+        try:
+            jobs = os.listdir(pier_root)
+        except OSError:
+            continue
+        for job in jobs:
+            projects.extend(compose_projects(os.path.join(pier_root, job)))
+    return cleanup_projects(projects, on_event)
+
+
 # ------------------------------------------------------------------ 执行入口
 def run_agent_eval(cfg, on_event=None, should_stop=None):
     """执行一轮 Agent 评测（pier 逐任务起容器跑 agent，再跑测试判定 reward）。
@@ -1356,6 +1469,11 @@ def run_agent_eval(cfg, on_event=None, should_stop=None):
         for record in collect():
             on_event("task_done", record)
         emit_progress(force=True)
+        # 兜底回收：pier 被中断/崩溃时不会自己 down，容器与网络会一直残留
+        try:
+            reclaim_job_containers(job_dir, on_event)
+        except Exception:            # 回收失败不能影响任务收尾
+            pass
 
     elapsed = time.time() - started
     rc = proc.returncode
