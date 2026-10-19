@@ -31,9 +31,26 @@ zhipuEval
 └── endpoint.md            # 服务访问端点记录
 ```
 
-## 启动
+## 安装与启动
 
-后端入口 `backend/api.py`（等价于原 `script/webapp.py`）：
+```bash
+./install.sh                 # 建 .venv + 装后端依赖 + 构建前端（需 Node 18+）
+./install.sh --all           # 再加压测引擎 evalscope[perf] 与 Agent 依赖（uv/pier/docker 检查）
+./install.sh --dry-run       # 只打印将要执行的命令
+
+./start.sh                   # 前台启动，默认 0.0.0.0:8000
+PORT=8010 ./start.sh         # 换端口（也可 --port 8010）
+./start.sh --daemon          # 后台启动，日志 runs/server.log
+./start.sh --status          # 查看运行状态
+./start.sh --stop            # 停止后台服务
+./start.sh --check           # 只做启动前检查，不启动
+```
+
+`start.sh` 启动前会检查依赖、前端产物与**端口占用**：端口被占时打印占用进程并提示
+换端口，避免出现"改了端口却仍访问到旧服务"；`--daemon` 模式会等 `/api/meta` 就绪后
+才返回，失败则打印日志尾部并清理进程。
+
+手动方式（不建 venv）：
 
 ```bash
 python3 -m pip install -r requirements.txt
