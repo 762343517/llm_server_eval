@@ -582,6 +582,15 @@ AGENT_CHOICES = ("mini-swe-agent", "oracle", "nop")
 MODEL_FREE_AGENTS = ("oracle", "nop")
 ENDPOINT_SUFFIXES = ("/chat/completions", "/completions", "/responses")
 
+# mini-swe-agent 的依赖声明没有上界（litellm>=1.75.5），uv tool install 会拉到最新版；
+# 而 litellm 1.106.0 起把 mcp 声明成 extra，却在 responses/mcp 里无条件硬导入：
+#   if not skip_mcp_handler and tools: from litellm.responses.mcp... import ...
+# mini-swe-agent 必然带 tools，于是首次调用前就 ModuleNotFoundError（steps/tokens 全 0）。
+# 这里锁定已验证的 agent 版本，并用 extra_python_packages 补装 mcp（pier 会执行
+# `uv pip install --python "$python_bin" ...`，装进同一个 tool venv）。
+MINI_SWE_AGENT_VERSION = "2.4.6"
+MINI_SWE_AGENT_EXTRA_PACKAGES = ["mcp>=2.2.0,<3"]
+
 
 _int = utils.int_or
 _opt_float = utils.float_or_none
@@ -644,6 +653,11 @@ def build_command(cfg, directory, names, jobs_dir, job_name):
         key = str(cfg.get("api_key") or "").strip()
         if key:
             argv += ["--ae", "OPENAI_API_KEY=" + key]
+    if agent == "mini-swe-agent":
+        # --ak 的 value 由 pier 用 literal_eval/JSON 解析，列表要写成 JSON 字面量
+        argv += ["--ak", "version=" + MINI_SWE_AGENT_VERSION]
+        argv += ["--ak", "extra_python_packages="
+                 + json.dumps(MINI_SWE_AGENT_EXTRA_PACKAGES)]
     for name in names:
         argv += ["-i", name]
     return argv, " ".join(shlex.quote(a) for a in _mask_argv(argv))
