@@ -31,49 +31,149 @@ code, .mono {
   font-size: 12.5px;
 }
 
-/* ---------------------------------------------------------------- 顶部导航 */
-.topbar {
+/* ---------------------------------------------------------------- 应用外壳：左侧导航 + 右侧内容 */
+.app-shell {
+  --side-w: 236px;
+  --side-w-min: 68px;
+  display: flex;
+  min-height: 100vh;
+}
+
+/* 侧栏：深色，桌面可收起为窄图标栏 */
+.sidebar {
+  position: sticky;
+  top: 0;
+  z-index: 30;
+  flex: none;
+  width: var(--side-w);
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  padding: 14px 12px 12px;
   background: var(--nav);
+  color: #e5e7eb;
+  overflow-y: auto;
+  overflow-x: hidden;
+  transition: width 0.18s ease;
+}
+.app-shell.collapsed .sidebar { width: var(--side-w-min); }
+
+.side-brand { display: flex; align-items: center; gap: 10px; padding: 2px 4px 14px; }
+.side-brand .logo {
+  flex: none;
+  width: 30px;
+  height: 30px;
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  background: linear-gradient(135deg, #2563eb, #7c3aed);
   color: #fff;
-  padding: 0 24px;
+  font-size: 14px;
+  font-weight: 600;
+}
+.side-brand-text { min-width: 0; overflow: hidden; white-space: nowrap; }
+.side-brand-text b { display: block; font-size: 13.5px; font-weight: 600; color: #f8fafc; }
+.side-brand-text small { display: block; font-size: 11px; color: #94a3b8; }
+.app-shell.collapsed .side-brand { justify-content: center; padding-left: 0; padding-right: 0; }
+.app-shell.collapsed .side-brand-text { display: none; }
+
+.side-nav { display: flex; flex-direction: column; gap: 4px; margin-top: 4px; }
+.side-link {
   display: flex;
   align-items: center;
-  gap: 24px;
-  min-height: 58px;
-  flex-wrap: wrap;
-  /* 固定在视口顶部：长页面滚动时导航不随内容上移。
-     sticky 而非 fixed：仍占文档流高度，无需给 main 补 padding */
+  gap: 10px;
+  padding: 9px 10px;
+  border-radius: 8px;
+  color: #cbd5e1;
+  font-size: 13.5px;
+  white-space: nowrap;
+  overflow: hidden;
+}
+.side-link:hover { background: rgba(255, 255, 255, 0.08); color: #fff; text-decoration: none; }
+.side-link.active { background: var(--primary); color: #fff; }
+.side-link .ico { flex: none; width: 18px; height: 18px; }
+.app-shell.collapsed .side-link { justify-content: center; padding: 10px 0; }
+.app-shell.collapsed .side-link .label { display: none; }
+
+.side-foot {
+  margin-top: auto;
+  padding-top: 12px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.side-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11.5px;
+  color: #94a3b8;
+  white-space: nowrap;
+  overflow: hidden;
+}
+.side-status .dot { flex: none; width: 7px; height: 7px; border-radius: 50%; background: #64748b; }
+.side-status.ok .dot { background: #22c55e; }
+.side-status.bad .dot { background: #ef4444; }
+.app-shell.collapsed .side-status { justify-content: center; }
+.app-shell.collapsed .side-status span { display: none; }
+
+/* 右侧主体：顶栏 + 内容区 */
+.app-body { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+
+.topbar {
   position: sticky;
   top: 0;
   z-index: 20;
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  height: 56px;
+  padding: 0 20px;
+  background: rgba(255, 255, 255, 0.92);
+  backdrop-filter: blur(8px);
+  border-bottom: 1px solid var(--line);
 }
 
-.brand { font-size: 16px; font-weight: 600; letter-spacing: 0.2px; }
-.brand small { display: block; font-weight: 400; color: #9ca3af; font-size: 11.5px; }
-
-.tabs { display: flex; gap: 6px; margin-left: auto; flex-wrap: wrap; align-items: center; }
-
-.tab {
-  color: #d1d5db;
-  padding: 7px 16px;
-  border-radius: 999px;
-  font-size: 13.5px;
+.nav-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--ink-soft);
+  cursor: pointer;
 }
-.tab:hover { background: rgba(255, 255, 255, 0.1); color: #fff; text-decoration: none; }
-.tab.active { background: var(--primary); color: #fff; }
+.nav-toggle:hover { background: #f1f5f9; border-color: var(--line); color: var(--ink); }
+.nav-toggle .ico { width: 18px; height: 18px; }
+
+.crumbs { display: flex; align-items: center; gap: 7px; font-size: 13px; min-width: 0; }
+.crumbs .sep { color: #cbd5e1; }
+.crumbs b { font-weight: 600; color: var(--ink); }
+
+.topbar-right { margin-left: auto; display: flex; align-items: center; gap: 8px; }
 
 .meta-chip {
   font-size: 12px;
-  color: #9ca3af;
-  border: 1px solid rgba(255, 255, 255, 0.18);
+  color: var(--ink-soft);
+  background: #f8fafc;
+  border: 1px solid var(--line);
   border-radius: 999px;
-  padding: 4px 12px;
+  padding: 3px 11px;
+  white-space: nowrap;
 }
-.meta-chip.ok { color: #86efac; border-color: rgba(134, 239, 172, 0.4); }
-.meta-chip.bad { color: #fca5a5; border-color: rgba(252, 165, 165, 0.4); }
+.meta-chip.ok { color: #15803d; background: #f0fdf4; border-color: #bbf7d0; }
+.meta-chip.bad { color: #b91c1c; background: #fef2f2; border-color: #fecaca; }
+
+/* 移动端抽屉遮罩 */
+.drawer-mask { position: fixed; inset: 0; z-index: 25; background: rgba(15, 23, 42, 0.45); }
 
 /* ---------------------------------------------------------------- 布局 */
-.wrap { max-width: 1280px; margin: 0 auto; padding: 22px 24px 60px; }
+.wrap { width: 100%; max-width: 1440px; margin: 0 auto; padding: 20px 24px 60px; }
 .page-head { display: flex; align-items: flex-start; gap: 16px; margin-bottom: 16px; flex-wrap: wrap; }
 .page-head h1 { font-size: 20px; margin: 0; }
 .page-head .sub { color: var(--ink-soft); font-size: 13px; margin-top: 2px; }
@@ -342,8 +442,23 @@ details.scenario pre { margin: 10px 0 0; white-space: pre-wrap; word-break: brea
 .mt { margin-top: 14px; }
 .nowrap { white-space: nowrap; }
 
+/* 窄屏：侧栏变抽屉，顶栏只保留菜单按钮与面包屑 */
+@media (max-width: 960px) {
+  .sidebar {
+    position: fixed;
+    top: 0;
+    left: 0;
+    height: 100vh;
+    width: 264px;
+    transform: translateX(-100%);
+    transition: transform 0.22s ease;
+    box-shadow: 0 12px 40px rgba(15, 23, 42, 0.35);
+  }
+  .app-shell.drawer-open .sidebar { transform: translateX(0); }
+  .topbar-right .meta-chip { display: none; }
+}
+
 @media (max-width: 760px) {
   .wrap { padding: 16px 14px 48px; }
   .field.span-2 { grid-column: span 1; }
-  .tabs { margin-left: 0; }
 }
