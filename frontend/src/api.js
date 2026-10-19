@@ -81,8 +81,8 @@ export const api = {
   agentStart: (cfg) => post('/api/agent/runs', cfg),
   agentSaveConfig: (cfg) => post('/api/agent/config', cfg),
   agentRun: (id) => request(`/api/agent/runs/${encodeURIComponent(id)}`),
-  agentItems: (id, { limit = 200, status = '', q = '' } = {}) =>
-    request(`/api/agent/runs/${encodeURIComponent(id)}/items${query({ limit, status, q })}`),
+  agentItems: (id, { limit = 200, status = '', kind = '', q = '' } = {}) =>
+    request(`/api/agent/runs/${encodeURIComponent(id)}/items${query({ limit, status, kind, q })}`),
   // 任务产物直链：测试输出 / 模型补丁 / 任务说明（内联文本预览，download=1 触发下载）
   agentFileUrl: (id, path, { download = false } = {}) =>
     `/api/agent/runs/${encodeURIComponent(id)}/file${query({ path, download: download ? 1 : '' })}`,

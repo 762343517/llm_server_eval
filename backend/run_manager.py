@@ -74,6 +74,8 @@ AGENT_CSV_COLUMNS = [
     ("category", "类别"),
     ("language", "语言"),
     ("status", "结果"),
+    ("failure_kind_text", "失败原因"),
+    ("failure_type", "异常类型"),
     ("reward", "reward"),
     ("steps", "步数"),
     ("input_tokens", "输入token"),
@@ -486,8 +488,9 @@ class RunManager:
             return rows[:limit]
         return rows
 
-    def export_csv(self, run_id, dest=None):
-        rows = self.read_items(run_id)
+    def export_csv(self, run_id, dest=None, rows=None):
+        """导出逐任务 CSV；rows 可由调用方传入（用于补齐旧记录缺的字段）。"""
+        rows = self.read_items(run_id) if rows is None else rows
         if not rows:
             return None, 0
         dest = dest or os.path.join(self.out_base(run_id) + ".csv")

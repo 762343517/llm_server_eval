@@ -761,20 +761,30 @@ def agent_status(run_id: str):
     prog = snap.get("progress") or {}
     snap["stage"] = prog.get("stage", "")
     snap["pct"] = prog.get("pct", 0.0)
+    summary = snap.get("summary") or {}
+    if summary and not summary.get("by_failure_kind"):
+        # 旧 run 的汇总没有失败原因分布，读取时按同一规则补一份（不落盘）
+        summary["by_failure_kind"] = agent_core.failure_kind_counts(
+            [agent_core.fill_failure_kind(row) for row in agent.read_items(run_id)])
     return JSONResponse(snap)
 
 
 @app.get("/api/agent/runs/{run_id}/items")
-def agent_items(run_id: str, limit: int = 500, status: str = "", q: str = ""):
-    """逐任务结果（默认按完成顺序）。"""
-    rows = agent.read_items(_valid_run_id(run_id))
+def agent_items(run_id: str, limit: int = 500, status: str = "", kind: str = "",
+                q: str = ""):
+    """逐任务结果（默认按完成顺序）；kind 过滤失败原因分类。"""
+    rows = [agent_core.fill_failure_kind(r)
+            for r in agent.read_items(_valid_run_id(run_id))]
     if status:
         rows = [r for r in rows if r.get("status") == status]
+    if kind:
+        rows = [r for r in rows if r.get("failure_kind") == kind]
     if q:
         needle = q.lower()
         rows = [r for r in rows
                 if any(needle in str(r.get(key, "")).lower()
-                       for key in ("task", "title", "problem", "error"))]
+                       for key in ("task", "title", "problem", "error",
+                                   "failure_kind_text", "failure_type"))]
     return JSONResponse({"total": len(rows), "items": rows[:limit]})
 
 
@@ -797,7 +807,8 @@ def agent_csv(run_id: str, limit: int = csvview.CSV_DEFAULT_LIMIT):
     """逐任务结果 CSV 预览。"""
     if not agent.get(_valid_run_id(run_id)):
         raise HTTPException(404, "任务不存在")
-    path, _ = agent.export_csv(run_id)
+    rows = [agent_core.fill_failure_kind(r) for r in agent.read_items(run_id)]
+    path, _ = agent.export_csv(run_id, rows=rows)
     if not path:
         raise HTTPException(404, "该任务暂无可导出的结果（逐任务记录为空）")
     return JSONResponse(csvview.preview(path, limit, title="{} 结果".format(run_id)))
@@ -807,7 +818,8 @@ def agent_csv(run_id: str, limit: int = csvview.CSV_DEFAULT_LIMIT):
 def agent_download_csv(run_id: str):
     if not agent.get(_valid_run_id(run_id)):
         raise HTTPException(404, "任务不存在")
-    path, _ = agent.export_csv(run_id)
+    rows = [agent_core.fill_failure_kind(r) for r in agent.read_items(run_id)]
+    path, _ = agent.export_csv(run_id, rows=rows)
     if not path:
         raise HTTPException(404, "暂无可导出的结果")
     return FileResponse(path, media_type="text/csv",

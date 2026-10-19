@@ -713,6 +713,81 @@ def trial_task(trial, meta_by_name=None):
     return prefix
 
 
+# ---------------------------------------------------------------- 失败原因分类
+# 非通过的任务统一标一个 failure_kind，用来区分“预算不够”“模型/指令没跟上”
+# 和“环境没起来”。只看异常类型与异常消息，不依赖任务名，也不改判分口径。
+FAILURE_KIND_TEXT = {
+    "timeout": "超时异常",
+    "instruction": "指令异常",
+    "environment": "环境异常",
+    "unresolved": "判分未通过",
+    "unknown": "未分类异常",
+}
+_TIMEOUT_HINTS = ("timeout", "timed out", "超时")
+# agent 起不来（命令缺失、路径错、无权限）虽然可能包成 NonZeroAgentExitCodeError，
+# 本质是 harness/环境问题，优先级高于指令异常。
+_STARTUP_HINTS = (
+    "command not found", "no such file or directory", "permission denied",
+    "exec format error", "not executable",
+)
+# 模型输出不符合 agent 协议，或模型服务本身报错（空响应、格式错、上下文超限）。
+_INSTRUCTION_HINTS = (
+    "formaterror", "format error", "repeatedformat", "no tool call",
+    "tool call", "toolcall", "invalid response", "empty response",
+    "outputlengthexceeded", "contextwindow", "context window",
+    "context length", "badrequest", "ratelimit", "authentication",
+    "apierror", "api error",
+)
+# 镜像、容器、网络、依赖安装、判定链路。
+_ENVIRONMENT_HINTS = (
+    "docker", "compose", "image", "container", "healthcheck",
+    "environmentstart", "agentsetup", "environment setup",
+    "network", "connection", "dns", "proxy", "pull access denied",
+    "manifest unknown", "could not find a version",
+    "no matching distribution", "install failed", "installation failed",
+)
+
+
+def classify_failure(status, exc_type="", message=""):
+    """把一条结果归到 failure_kind；通过的任务返回空串。"""
+    if status == "resolved":
+        return ""
+    if status != "error":
+        return "unresolved"
+    # 只取消息前 400 字符：NonZeroAgentExitCodeError 会把整条任务指令拼进消息，
+    # 全量匹配容易被指令正文里的字眼带偏。
+    text = "{} {}".format(exc_type or "", (message or "")[:400]).lower()
+    if any(h in text for h in _TIMEOUT_HINTS):
+        return "timeout"
+    if any(h in text for h in _STARTUP_HINTS):
+        return "environment"
+    if any(h in text for h in _INSTRUCTION_HINTS):
+        return "instruction"
+    if any(h in text for h in _ENVIRONMENT_HINTS):
+        return "environment"
+    return "unknown"
+
+
+def fill_failure_kind(row):
+    """旧 run 的 items 没有分类字段，读取时按同一规则补齐（只改内存对象）。"""
+    if row.get("failure_kind"):
+        return row
+    kind = classify_failure(str(row.get("status") or ""),
+                            str(row.get("failure_type") or ""),
+                            str(row.get("error") or ""))
+    row["failure_kind"] = kind
+    row["failure_kind_text"] = FAILURE_KIND_TEXT.get(kind, "")
+    return row
+
+
+def failure_kind_counts(records):
+    """失败原因分布，固定顺序返回，便于前端直接渲染。"""
+    counts = collections.Counter(r.get("failure_kind") for r in records
+                                 if r.get("failure_kind"))
+    return [{"kind": kind, "text": text, "count": counts.get(kind, 0)}
+            for kind, text in FAILURE_KIND_TEXT.items()]
+
+
 def trial_record(trial_dir, data, meta=None):
     """把 pier 的 trial result.json 归一化成一条结果记录。"""
     task_dir = str((data.get("task_id") or {}).get("path") or "")
@@ -724,6 +799,7 @@ def trial_record(trial_dir, data, meta=None):
     rewards = ((data.get("verifier_result") or {}).get("rewards")) or {}
     reward = _opt_float(rewards.get("reward"))
     exc = data.get("exception_info") or {}
+    exc_type = str(exc.get("exception_type") or "").strip()
     error = str(exc.get("exception_message") or exc.get("exception_type") or "").strip()
     agent = data.get("agent_result") or {}
     started, finished = _epoch(data.get("started_at")), _epoch(data.get("finished_at"))
@@ -733,12 +809,16 @@ def trial_record(trial_dir, data, meta=None):
         status = "resolved"
     else:
         status = "unresolved"
+    failure_kind = classify_failure(status, exc_type, error)
     return {
         "task": name,
         "title": info.get("title") or name,
         "category": info.get("category", ""),
         "language": info.get("language", ""),
         "status": status,
+        "failure_kind": failure_kind,
+        "failure_kind_text": FAILURE_KIND_TEXT.get(failure_kind, ""),
+        "failure_type": exc_type[:120],
         "reward": reward,
         "steps": _int(agent.get("n_agent_steps") or data.get("n_agent_steps")),
         "input_tokens": _int(agent.get("n_input_tokens")),
@@ -1116,6 +1196,7 @@ def run_agent_eval(cfg, on_event=None, should_stop=None):
         "tasks": [t["name"] for t in selected],
         "by_category": _group(items, "category"),
         "by_language": _group(items, "language"),
+        "by_failure_kind": failure_kind_counts(items),
         "stopped": stopped,
         "raw": os.path.relpath(jobs_dir, consts.PROJECT_ROOT),
     }

@@ -14,7 +14,7 @@ const items = ref([])
 const itemTotal = ref(0)
 const error = ref('')
 const busy = ref(false)
-const filters = ref({ status: '', q: '', limit: 200 })
+const filters = ref({ status: '', kind: '', q: '', limit: 200 })
 let timer = null
 let tick = 0
 
@@ -52,8 +52,27 @@ const rowClass = (row) => {
   return ''
 }
 const STATUS_TEXT = { resolved: '通过', unresolved: '未通过', error: '异常' }
+// 失败原因分类（后端 failure_kind），用于筛选与表格标注
+const KIND_TEXT = {
+  timeout: '超时异常',
+  instruction: '指令异常',
+  environment: '环境异常',
+  unresolved: '判分未通过',
+  unknown: '未分类异常',
+}
 
 const statusOptions = computed(() => [...new Set(items.value.map((i) => i.status).filter(Boolean))])
+const kindOptions = computed(() => [...new Set(items.value.map((i) => i.failure_kind).filter(Boolean))])
+// 汇总优先用后端统计；旧 run 缺该字段时按当前已加载条目兜底
+const kindRows = computed(() => {
+  const fromSummary = summary.value.by_failure_kind
+  if (Array.isArray(fromSummary) && fromSummary.length) return fromSummary
+  const counts = {}
+  for (const row of items.value) {
+    if (row.failure_kind) counts[row.failure_kind] = (counts[row.failure_kind] || 0) + 1
+  }
+  return Object.entries(KIND_TEXT).map(([kind, text]) => ({ kind, text, count: counts[kind] || 0 }))
+})
 
 // 产物：测试输出 / 模型补丁 / 任务日志（后端只允许读取该任务目录内的文件）
 const artifactUrl = (row, rel) =>
@@ -208,6 +227,10 @@ onUnmounted(() => timer && clearInterval(timer))
         <option value="">全部结果</option>
         <option v-for="s in statusOptions" :key="s" :value="s">{{ STATUS_TEXT[s] || s }}</option>
       </select>
+      <select v-model="filters.kind" @change="loadItems">
+        <option value="">全部失败原因</option>
+        <option v-for="k in kindOptions" :key="k" :value="k">{{ KIND_TEXT[k] || k }}</option>
+      </select>
       <input v-model.trim="filters.q" type="text" placeholder="搜索任务名 / 说明 / 异常" @keyup.enter="loadItems" />
       <select v-model.number="filters.limit" @change="loadItems">
         <option :value="100">显示 100 条</option>
@@ -255,6 +278,7 @@ onUnmounted(() => timer && clearInterval(timer))
               <span class="badge" :class="{ ok: row.status === 'resolved', bad: row.status === 'error' }">
                 {{ STATUS_TEXT[row.status] || row.status }}
               </span>
+              <div v-if="row.failure_kind_text" class="muted">{{ row.failure_kind_text }}</div>
               <div class="muted">{{ row.category || '' }}</div>
             </td>
             <td class="num">{{ row.reward === null || row.reward === undefined ? '—' : shortFixed(row.reward, 3) }}</td>
@@ -269,7 +293,10 @@ onUnmounted(() => timer && clearInterval(timer))
               </div>
             </td>
             <td>
-              <span v-if="row.error" class="clip" :title="row.error">{{ row.error }}</span>
+              <span v-if="row.error" class="clip" :title="row.error">
+                <span v-if="row.failure_kind_text" class="muted">[{{ row.failure_kind_text }}]</span>
+                {{ row.error }}
+              </span>
               <span v-else-if="row.verifier_tail" class="clip" :title="row.verifier_tail">
                 {{ row.verifier_tail }}
               </span>
@@ -291,7 +318,19 @@ onUnmounted(() => timer && clearInterval(timer))
         :sub="`${v.resolved}/${v.total}`"
       />
     </div>
-    <p class="hint mt">按任务类别统计；详细字段与结果 JSON 一致</p>
+    <div v-if="kindRows.some((r) => r.count)" class="stats mt">
+      <StatTile
+        v-for="r in kindRows.filter((x) => x.count)"
+        :key="r.kind"
+        :label="r.text"
+        :value="int(r.count)"
+        :tone="r.kind === 'timeout' || r.kind === 'environment' ? 'bad' : ''"
+      />
+    </div>
+    <p class="hint mt">
+      上排按任务类别统计；下排为失败原因分布（超时 / 指令 / 环境 / 判分未通过），
+      详细字段与结果 JSON 一致
+    </p>
     <KvList :items="Object.entries(summary).map(([k, v]) => ({ k, v: typeof v === 'object' ? JSON.stringify(v) : String(v) }))" />
   </Card>
 
