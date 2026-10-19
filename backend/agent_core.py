@@ -281,15 +281,15 @@ def _pull_candidates(image):
 
 
 def ensure_images_local(images, on_event=None, should_stop=None):
-    """把本机缺失的任务镜像取回并 tag 回原名，返回 (ready, failed)。
+    """把本机缺失的任务镜像拉取并 tag 回原名，返回 (ready, failed)。
 
     为什么要主动做：pier 每次跑完会 `docker compose down --rmi all`，把任务镜像的 tag 撤掉
     （镜像 ID 若还有别的 tag 则不会真删）；下一次运行于是必须重新拉取，拉不到整个 run 会被
     记成「环境错误」而不是「判分不通过」。这里在起 pier 之前把镜像补齐，补不齐就提前报错并
     指明缺哪个。
 
-    should_stop 为真时立即中止：已取回的保留，未处理的既不记入 ready 也不记入 failed，
-    调用方应据此区分「被用户停止」与「网络取回失败」。
+    should_stop 为真时立即中止：已拉取的保留，未处理的既不记入 ready 也不记入 failed，
+    调用方应据此区分「被用户停止」与「网络拉取失败」。
     """
     emit = on_event or (lambda kind, payload=None: None)
     should_stop = should_stop or (lambda: False)
@@ -310,7 +310,7 @@ def ensure_images_local(images, on_event=None, should_stop=None):
         ok = False
         for ref in _pull_candidates(image):
             if ref != image:
-                emit("task_log", {"msg": "[镜像] 经 {} 取回 {} …".format(
+                emit("task_log", {"msg": "[镜像] 经 {} 拉取 {} …".format(
                     ref.split("/", 1)[0], image)})
             rc, out = _run_interruptible(wrap_argv(["docker", "pull", ref], docker["mode"]),
                                          consts.DEFAULT_IMAGE_PULL_TIMEOUT, should_stop)
@@ -338,7 +338,7 @@ def ensure_images_local(images, on_event=None, should_stop=None):
             break
         (ready if ok else failed).append(image)
     if stopped:
-        emit("task_log", {"msg": "[停止] 已中止镜像取回：已就绪 {} 个，未处理 {} 个".format(
+        emit("task_log", {"msg": "[停止] 已中止镜像拉取：已就绪 {} 个，未处理 {} 个".format(
             len(ready), len(missing) - len(ready) - len(failed))})
     refresh_images()                                     # 让 known_images 下次重新枚举
     return ready, failed
@@ -591,6 +591,11 @@ ENDPOINT_SUFFIXES = ("/chat/completions", "/completions", "/responses")
 MINI_SWE_AGENT_VERSION = "2.4.6"
 MINI_SWE_AGENT_EXTRA_PACKAGES = ["mcp>=2.2.0,<3"]
 
+# 这里刻意不覆盖 mini-swe-agent 的 max_consecutive_format_errors / format_error_template：
+# 模型返回空响应（content 与 tool_calls 均为 null）属于模型服务质量问题，按 agent 默认值
+# （连续 3 次格式错误即 RepeatedFormatError 退出）如实暴露，不做针对性放宽或改写提示。
+# 需要排查时看 trajectory 里的空响应次数即可，不要通过调大阈值把问题掩盖掉。
+
 
 _int = utils.int_or
 _opt_float = utils.float_or_none
@@ -658,6 +663,8 @@ def build_command(cfg, directory, names, jobs_dir, job_name):
         argv += ["--ak", "version=" + MINI_SWE_AGENT_VERSION]
         argv += ["--ak", "extra_python_packages="
                  + json.dumps(MINI_SWE_AGENT_EXTRA_PACKAGES)]
+        # 不注入 config_yaml：格式错误阈值与提示模板一律用 mini-swe-agent 默认值，
+        # 模型空响应等服务质量问题如实暴露，见文件上方说明。
     for name in names:
         argv += ["-i", name]
     return argv, " ".join(shlex.quote(a) for a in _mask_argv(argv))
@@ -933,17 +940,17 @@ def run_agent_eval(cfg, on_event=None, should_stop=None):
     on_event("task_log", {"msg": "[命令] " + shown})
     pending_images = [t for t in selected if not t["image_ready"] and t["docker_image"]]
     if pending_images:
-        on_event("task_log", {"msg": "[镜像] {} 个任务的镜像不在本机，尝试取回"
+        on_event("task_log", {"msg": "[镜像] {} 个任务的镜像不在本机，尝试拉取"
                                       "（pier 每次跑完会撤掉镜像 tag）".format(
                                           len(pending_images))})
         _, failed = ensure_images_local([t["docker_image"] for t in pending_images],
                                         on_event, should_stop=should_stop)
         if should_stop():
-            # 停止可能发生在镜像取回阶段：此时还没起 pier，直接收敛为「已停止」
-            on_event("task_log", {"msg": "[停止] 镜像取回阶段收到停止请求，本轮不启动 pier"})
+            # 停止可能发生在镜像拉取阶段：此时还没起 pier，直接收敛为「已停止」
+            on_event("task_log", {"msg": "[停止] 镜像拉取阶段收到停止请求，本轮不启动 pier"})
             return None
         if failed:
-            raise RuntimeError("以下任务镜像本机缺失且取回失败：{}。请检查网络，或用 "
+            raise RuntimeError("以下任务镜像本机缺失且拉取失败：{}。请检查网络，或用 "
                                "ZHIPU_EVAL_IMAGE_MIRRORS 指定可用的镜像加速器。".format(
                                    "、".join(failed[:5])))
 

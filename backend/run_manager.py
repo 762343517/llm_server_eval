@@ -386,7 +386,7 @@ class RunManager:
                 should_stop=state.stop_event.is_set,
             )
             if state.stop_event.is_set():
-                # 停止优先于「无结果」：停止可能发生在还没有任何结果的阶段（如镜像取回），
+                # 停止优先于「无结果」：停止可能发生在还没有任何结果的阶段（如镜像拉取），
                 # 此时不返回 summary，若先判 None 会把「用户停止」误记成「任务失败」。
                 state.status = "stopped"
                 if summary is None:

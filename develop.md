@@ -78,7 +78,7 @@
 |---|---|
 | `backend/agent_core.py` | 新增 `MINI_SWE_AGENT_VERSION = "2.4.6"`、`MINI_SWE_AGENT_EXTRA_PACKAGES = ["mcp>=2.2.0,<3"]`；`build_command` 对 mini-swe-agent 追加两个 `--ak` |
 | pier `environments/agent_setup.py` | 新增 `DEFAULT_UV_BASE_IMAGE`；`write_agent_dockerfile` 在 `FROM` 后插入 `COPY --from=zhipu-eval/uv-base:0.7.13 /uv /opt/uv/bin/uv`；可用 `PIER_UV_BASE_IMAGE=""` 关闭 |
-| pier `agents/installed/mini_swe_agent.py` | uv 安装改幂等（预置存在则跳过 curl）；`/opt/uv/bin` 加 PATH；`$HOME/.local/bin` 无条件加 PATH；`source env` 加 `[ -f ]` 保护 |
+| pier `agents/installed/mini_swe_agent.py` | uv 安装改幂等（预置存在则跳过 curl）；`/opt/uv/bin` 加 PATH；`$HOME/.local/bin` 无条件加 PATH；构建期补建 `$HOME/.local/bin/env`；**运行期**命令与版本检测前置 `export PATH` + `[ -f env ] && . env` |
 | 镜像 | `zhipu-eval/uv-base:0.7.13`（debian-slim + uv 0.7.13，175 MB） |
 
 ### G. 验证记录
@@ -99,6 +99,24 @@
 3. **pier 改动在 site-packages**，`uv tool upgrade datacurve-pier` 会覆盖；原文件已备份为同目录 `.orig`。
    注意 `agent_setup.py` 原本还有一处 egress 端口放宽（`acl Safe_ports port 80 443` → `80 443 3000-65535`），
    重打 patch 时**不要覆盖**它。
+
+### I. 运行期仍找不到 mini-swe-agent（上面对策只修了构建期）
+
+现象：镜像构建正常，agent 一启动就 `bash: /root/.local/bin/env: No such file or directory`
++ `mini-swe-agent: command not found`（exit 127，0 步 0 token，verifier 因未改动而全 fail）。
+
+- **运行期命令由 pier 自己拼接**，以 `. "$HOME/.local/bin/env"` 开头给 shell 加 PATH；
+  预置 uv 的路径下 `install.sh` 从未执行 → 该 env 文件不存在。
+- 构建期的 `export PATH` 只作用于构建 shell，运行期另起 shell **不继承**。
+- `.` 失败不中断（`;` 连接），最终报的是 `mini-swe-agent: command not found`，容易误判成"没装上"。
+- 只有镜像里本来就有该 env 文件的任务（如 abs-* 系列）能跑通 → 表现为"部分任务全 0 步"。
+
+修复（pier `agents/installed/mini_swe_agent.py`）：构建期补建 `$HOME/.local/bin/env`；
+运行命令与 `get_version_command` 前置 `export PATH="$HOME/.local/bin:$PATH"; [ -f env ] && . env`；
+版本检测再加 `/opt/uv/bin`（运行期 `uv` 同样不在 PATH）。安装步骤变了 → 指纹变 → 旧镜像自动失效。
+
+验证：真实任务镜像内 `. "$HOME/.local/bin/env"; mini-swe-agent --help` 输出 2.4.6；
+pier 单任务实跑，agent 首个 tool call 正常执行。
 
 重建 uv-base：
 
