@@ -18,6 +18,10 @@ cd "$ROOT"
 # pier 会去 GitHub 拉模型价目表，内网下每次 `pier --version` 要 20s+，这里统一关掉
 export LITELLM_LOCAL_MODEL_COST_MAP="${LITELLM_LOCAL_MODEL_COST_MAP:-true}"
 
+# uv tool（pier）装到 ~/.local/bin、pip 装进本项目 venv 的脚本落在 .venv/bin，
+# 未激活虚拟环境时都不在 PATH 里，自检会误报“未安装”，这里统一补上
+export PATH="$HOME/.local/bin:$PATH"
+
 WITH_PERF=0
 WITH_AGENT=0
 BUILD_FRONTEND=1
@@ -94,19 +98,37 @@ install_deps() {
     ok "fastapi / uvicorn / pandas / pyarrow / tiktoken / pyyaml"
 }
 
-evalscope_available() {
-    { [ -n "${EVALSCOPE_BIN:-}" ] && [ -x "${EVALSCOPE_BIN}" ]; } \
-        || command -v evalscope >/dev/null 2>&1
+# 与后端 perf_core.resolve_bin 一致：EVALSCOPE_BIN > PATH > venv/bin > 常见位置
+evalscope_path() {
+    if [ -n "${EVALSCOPE_BIN:-}" ] && [ -x "${EVALSCOPE_BIN}" ]; then
+        printf '%s\n' "$EVALSCOPE_BIN"; return 0
+    fi
+    local bin
+    if bin=$(command -v evalscope 2>/dev/null); then
+        printf '%s\n' "$bin"; return 0
+    fi
+    for bin in "$VENV/bin/evalscope" "$HOME/.local/bin/evalscope" "/usr/local/bin/evalscope"; do
+        if [ -x "$bin" ]; then printf '%s\n' "$bin"; return 0; fi
+    done
+    return 1
 }
+
+evalscope_available() { evalscope_path >/dev/null 2>&1; }
 
 install_perf() {
     if evalscope_available; then
-        ok "已存在 evalscope（$(command -v evalscope 2>/dev/null || echo "$EVALSCOPE_BIN")），跳过安装"
+        ok "已存在 evalscope（$(evalscope_path)），跳过安装"
         return 0
     fi
     info "安装压测引擎 evalscope[perf]（依赖较重，首次约数百 MB）"
     run "$PY" -m pip install --quiet --disable-pip-version-check 'evalscope[perf]'
-    ok "evalscope 已安装到 $VENV（非标准位置可用 EVALSCOPE_BIN 指定）"
+    if [ "$DRY_RUN" = 1 ]; then
+        printf '  + test -x %s/bin/evalscope\n' "$VENV"
+        return 0
+    fi
+    evalscope_available \
+        || die "evalscope 安装后仍找不到可执行文件（查看 $VENV/bin/evalscope，或用 EVALSCOPE_BIN 指定）"
+    ok "evalscope $(evalscope_path)（压测可用）"
 }
 
 install_agent() {
@@ -185,10 +207,9 @@ if missing:
     sys.exit(1)
 print("  \033[0;32m✓\033[0m 后端依赖齐全")
 PY
-    # evalscope 常用 uv tool 装到 ~/.local/bin，不一定在当前解释器的 site-packages
-    if [ -n "${EVALSCOPE_BIN:-}" ] && [ -x "${EVALSCOPE_BIN}" ]; then
-        ok "evalscope（EVALSCOPE_BIN=${EVALSCOPE_BIN}，压测可用）"
-    elif evalscope_bin=$(command -v evalscope 2>/dev/null); then
+    # evalscope 可能来自：EVALSCOPE_BIN、PATH（uv tool 装到 ~/.local/bin）、
+    # 或 pip 装进本项目 venv 的 bin 目录
+    if evalscope_bin=$(evalscope_path); then
         ok "evalscope（${evalscope_bin}，压测可用）"
     else
         warn "evalscope 未安装：压测不可用（./install.sh --perf）"

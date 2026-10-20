@@ -71,6 +71,9 @@ if [ -x "$ROOT/.venv/bin/python" ]; then
 else
     PY=$(command -v python3) || die "找不到 python3，请先运行 ./install.sh"
 fi
+# 让后端（以及它拉起的子进程）能找到与解释器同级的命令行工具：
+# pip 装进 venv 的 evalscope 落在 .venv/bin，未激活虚拟环境时不在 PATH 里。
+export PATH="$ROOT/.venv/bin:$HOME/.local/bin:$PATH"
 "$PY" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)' \
     || die "Python 版本过低（$("$PY" -V 2>&1)），需要 3.10+"
 
@@ -157,7 +160,7 @@ PY
         warn "docker 不可用：Agent 评测不可用"
     fi
 
-    # 与后端查找顺序一致：EVALSCOPE_BIN → PATH（evalscope 常用 uv tool 装到 ~/.local/bin）
+    # 与后端查找顺序一致：EVALSCOPE_BIN → PATH（含上面刚补上的 .venv/bin 与 ~/.local/bin）
     if [ -n "${EVALSCOPE_BIN:-}" ] && [ -x "${EVALSCOPE_BIN}" ]; then
         ok "evalscope（EVALSCOPE_BIN=${EVALSCOPE_BIN}）"
     elif evalscope_bin=$(command -v evalscope 2>/dev/null); then

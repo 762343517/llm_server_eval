@@ -104,7 +104,7 @@ _LEVEL_RE = re.compile(r"parallel_(\d+)_number_(\d+)")
 
 # --------------------------------------------------------------------- 可执行文件
 def resolve_bin():
-    """定位 evalscope：环境变量 > PATH > 常见安装位置。"""
+    """定位 evalscope：环境变量 > PATH > 当前解释器同目录 > 常见安装位置。"""
     raw = (os.environ.get("EVALSCOPE_BIN") or "").strip()
     if raw:
         if os.path.isfile(raw) and os.access(raw, os.X_OK):
@@ -113,7 +113,10 @@ def resolve_bin():
     found = shutil.which(CLI_NAME)
     if found:
         return found
-    for cand in ("~/.local/bin/evalscope", "/usr/local/bin/evalscope"):
+    # pip install 装进项目 venv 时，可执行文件与解释器同级（.venv/bin/evalscope）；
+    # 服务由 start.sh 用该解释器启动，但 venv 未必在 PATH 里，因此单独看这里。
+    local_bin = os.path.join(os.path.dirname(sys.executable), CLI_NAME)
+    for cand in (local_bin, "~/.local/bin/evalscope", "/usr/local/bin/evalscope"):
         path = os.path.expanduser(cand)
         if os.path.isfile(path) and os.access(path, os.X_OK):
             return path
@@ -121,11 +124,16 @@ def resolve_bin():
 
 
 def command_prefix():
-    """命令前缀：优先 PATH 中的 evalscope，退化为 `python -m evalscope`。"""
+    """命令前缀：优先定位到可执行文件，退化为在当前解释器里调入口函数。
+
+    evalscope 没有 `__main__.py`，`python -m evalscope` 会直接报
+    "No module named evalscope.__main__"，因此兜底走 console_scripts 的入口函数。
+    """
     path = resolve_bin()
     if path:
         return [path]
-    return [sys.executable, "-m", CLI_NAME]
+    return [sys.executable, "-c",
+            "import sys; from evalscope.cli.cli import run_cmd; sys.exit(run_cmd())"]
 
 
 def probe(force=False):
@@ -143,7 +151,7 @@ def probe(force=False):
             info["available"] = True
             info["version"] = out.replace(CLI_NAME, "").strip() or out
             if not path:
-                info["path"] = "{} -m {}".format(sys.executable, CLI_NAME)
+                info["path"] = "{}（内置模块调用）".format(sys.executable)
         else:
             info["error"] = "evalscope --version 退出码 {}: {}".format(proc.returncode, out[:200])
     except FileNotFoundError:
