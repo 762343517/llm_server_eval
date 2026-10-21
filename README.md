@@ -206,6 +206,15 @@ pier 正常结束会执行 `docker compose down --rmi all`；中断场景（点�
 
 run 的 `cfg.data` 记的是**任务集标识**：登记在 `dataset/datasets.json` 的写名称（如 `deepswe`），未登记的自定义路径写绝对路径（见 `adapters/tasks.py::key_for`）。执行与看板一律经 `resolve_dir()` 解析成任务目录，因此项目改名/换机器后历史 run 仍可解析；早期 run 记录的旧工作区绝对路径（如 `.../zhipuEval/dataset/deepswe/tasks`）按 `dataset/` 之后的相对部分重定位到当前 `DATASET_DIR`（`rebase_dataset_path`），解析不出来时子任务看板退化成「只看磁盘」列出已跑子任务，不会整页报错。绝对路径仍完整保存在 `summary.tasks_dir`。
 
+### 6.4 任务名称与说明
+
+「历史任务」列表的前两列是任务名称与说明，两者都落在 run 的 `cfg` 里（随 `meta.json` 持久化）：
+
+- `cfg.name`（任务名称）：表单里的选填项，只用于列表展示；留空按「任务集 · agent」自动命名（`agent_core.default_name`），每次新建任务都重新填，不沿用上次保存的配置；
+- `cfg.desc`（说明）：由发起时的表单配置生成（模型、端点、任务范围「全部 / 随机 N 个（种子）」/ 指定 N 个、并发、非 1 的超时倍数），不含密钥（`agent_core.describe_cfg`）。
+
+早期 run 的 `cfg` 没有这两个字段，列表接口（`_decorate_agent`）按同一套规则现算，不做数据迁移。
+
 ## 7. 压力测试（EvalScope 集成）
 
 ### 7.1 依赖与探测

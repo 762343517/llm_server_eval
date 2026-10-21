@@ -103,6 +103,7 @@ const applyDefaults = () => {
   const resolved = d.data ? byKey(d.data) : ''
   const custom = d.data && !resolved ? d.data : ''
   Object.assign(form, {
+    name: '',                      // 任务名称每个任务单独起名，不沿用上次
     agent: d.agent || 'mini-swe-agent',
     endpoint: d.endpoint || '',
     api_key: d.api_key || '',
@@ -330,6 +331,11 @@ onUnmounted(() => timer && clearInterval(timer))
       </p>
 
       <div class="grid">
+        <div class="field span-2">
+          <label>任务名称（选填）</label>
+          <input v-model.trim="form.name" type="text" placeholder="如 deepswe 冒烟测试；留空按「任务集 · agent」自动命名" />
+          <span class="tip">只用于任务列表展示，不参与评测；说明列由下面的配置自动生成</span>
+        </div>
         <div class="field">
           <label>执行 agent</label>
           <select v-model="form.agent">
@@ -519,6 +525,8 @@ onUnmounted(() => timer && clearInterval(timer))
       <table>
         <thead>
           <tr>
+            <th style="min-width: 150px">任务名称</th>
+            <th style="min-width: 240px">说明</th>
             <th>任务</th>
             <th>状态</th>
             <th>任务集</th>
@@ -532,6 +540,10 @@ onUnmounted(() => timer && clearInterval(timer))
         </thead>
         <tbody>
           <tr v-for="run in runs" :key="run.run_id">
+            <td>
+              <RouterLink :to="`/agent/${run.run_id}`" class="clip" :title="run.name">{{ run.name }}</RouterLink>
+            </td>
+            <td><span class="clip" :title="run.desc">{{ run.desc || '—' }}</span></td>
             <td>
               <RouterLink :to="`/agent/${run.run_id}`" class="mono">{{ run.run_id }}</RouterLink>
               <div class="muted">{{ run.started_at_str }}</div>

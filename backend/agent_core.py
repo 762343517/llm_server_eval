@@ -448,6 +448,51 @@ def tasks_key(data, directory=""):
     return adapters.tasks.key_for(data, directory)
 
 
+def default_name(cfg):
+    """任务名称缺省值：任务集 · agent（用户在表单里没填名称时用）。"""
+    cfg = cfg or {}
+    data = str(cfg.get("data") or "").strip()
+    directory = resolve_tasks_dir(data) if data else ""
+    label = tasks_label(directory) if directory else (data or "-")
+    agent = str(cfg.get("agent") or "").strip()
+    return "{} · {}".format(label, agent) if agent else label
+
+
+def describe_cfg(cfg):
+    """发起任务时的表单配置摘要（任务列表的「说明」列）。
+
+    只列影响评测结果的项：模型与端点、任务范围、并发、超时倍数。密钥不参与。
+    """
+    cfg = cfg or {}
+    parts = []
+    model = str(cfg.get("model") or "").strip()
+    if model:
+        parts.append("模型 " + model)
+    endpoint = str(cfg.get("endpoint") or "").strip()
+    if endpoint:
+        parts.append("端点 " + endpoint)
+    tasks = str(cfg.get("tasks") or "").strip()
+    limit = int(cfg.get("limit") or 0)
+    if tasks:
+        picked = [n for n in tasks.replace("\n", ",").split(",") if n.strip()]
+        parts.append("指定 {} 个任务".format(len(picked)))
+    elif limit:
+        seed = int(cfg.get("seed") or 0)
+        parts.append("随机抽 {} 个".format(limit)
+                     + ("（种子 {}）".format(seed) if seed else ""))
+    else:
+        parts.append("全部任务")
+    concurrency = int(cfg.get("concurrency") or 0)
+    if concurrency:
+        parts.append("并发 {}".format(concurrency))
+    for key, text in (("timeout_multiplier", "任务超时"),
+                      ("verifier_timeout_multiplier", "判定超时")):
+        value = _num(cfg.get(key))
+        if value and value != 1:
+            parts.append("{} ×{}".format(text, value))
+    return " · ".join(parts)
+
+
 # 数值兜底统一收敛到 utils（原先 api / agent_core / perf_core 各写一份）
 _num = utils.float_or
 

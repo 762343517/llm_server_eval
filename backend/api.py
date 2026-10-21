@@ -660,6 +660,10 @@ def _decorate_agent(runs):
     for r in runs:
         r["status_text"] = ACC_STATUS_TEXT.get(r.get("status"), r.get("status"))
         r["queue_position"] = task_queue.QUEUE.position(r.get("run_id"))
+        # 名称/说明：新任务随 cfg 落盘；旧任务的 meta 里没有这两个字段，按配置现算
+        cfg = r.get("cfg") or {}
+        r["name"] = str(cfg.get("name") or "").strip() or agent_core.default_name(cfg)
+        r["desc"] = str(cfg.get("desc") or "").strip() or agent_core.describe_cfg(cfg)
         s = r.get("summary") or {}
         if s and "num_scored" not in s and r.get("run_id"):
             # 旧 run 的 pass_at_1 按旧口径落盘（环境/超时也计入分母），读取时按现口径重算
@@ -715,6 +719,9 @@ def _agent_cfg(payload):
         if not 0.01 <= value <= 100:
             raise HTTPException(400, "{}需在 0.01~100 之间".format(label))
     cfg = {
+        # 任务名称与说明：名称可留空（按「任务集 · agent」自动命名），说明始终由
+        # 表单配置生成，两者都随 meta.json 落盘，历史任务列表直接展示
+        "name": (payload.get("name") or "").strip()[:80],
         # 落盘记数据集名称而不是绝对路径：历史 run 曾记绝对路径，项目改名后
         # 解析不到任务目录，子任务看板直接 500（绝对路径另存在 summary.tasks_dir）
         "data": agent_core.tasks_key(data, directory),
@@ -731,6 +738,8 @@ def _agent_cfg(payload):
         "timeout_multiplier": timeout,
         "verifier_timeout_multiplier": verifier_timeout,
     }
+    cfg["name"] = cfg["name"] or agent_core.default_name(cfg)
+    cfg["desc"] = agent_core.describe_cfg(cfg)
     return cfg
 
 
