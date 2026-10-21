@@ -57,6 +57,8 @@ const cfgRows = computed(() => {
   const isRampCfg = c.concurrency_mode
     ? c.concurrency_mode === 'ramp'
     : Array.isArray(c.ramp_levels) && c.ramp_levels.length > 0
+  // 输出长度统一展示 output_length（与命令里的 --max-tokens 同源）；早期快照只有 max_tokens
+  const outLen = c.output_length || c.max_tokens
   const rows = [
     { k: '任务名称', v: text(c.name) },
     { k: '说明', v: text(c.description) },
@@ -70,7 +72,7 @@ const cfgRows = computed(() => {
     rows.push(
       { k: '分词器路径', v: text(c.tokenizer_path) },
       { k: '序列长度', v: c.seq_length ? `${c.seq_length} tokens` : '—' },
-      { k: '输出长度', v: c.output_length ? `${c.output_length} tokens` : '—' },
+      { k: '输出长度', v: outLen ? `${outLen} tokens` : '—' },
       {
         k: 'Prefix Cache 命中率',
         v: custom ? '按前缀内容自动' : c.prefix_cache_ratio === null ? '—' : pct(c.prefix_cache_ratio),
@@ -99,7 +101,7 @@ const cfgRows = computed(() => {
     )
   } else {
     rows.push(
-      { k: 'max_tokens', v: text(c.max_tokens) },
+      { k: '输出长度', v: outLen ? `${outLen} tokens` : '—' },
       { k: '系统提示词', v: text(c.system_prompt) },
       { k: '提问内容', v: text(c.prompt) },
       { k: '对话轮数', v: text(c.turns) },

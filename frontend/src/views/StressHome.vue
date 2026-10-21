@@ -201,13 +201,20 @@ const loadAll = async (force = false) => {
   refreshing.value = false
 }
 
+// 输出长度只有一个口径：表单只留「输出长度」，提交时把 max_tokens 同步成同一值，
+// 配合后端 build_command 统一取 output_length()，不再出现「配置 1024、实际发 512」
+const stressPayload = () => ({
+  ...form,
+  max_tokens: Math.max(1, Number(form.output_length) || 1),
+})
+
 // 手动保存：只校验并落盘，不启动任务（改了表单没启动 / 启动失败时不会丢配置）
 const saveConfig = async () => {
   error.value = ''
   notice.value = ''
   saving.value = true
   try {
-    await api.stressSaveConfig({ ...form })
+    await api.stressSaveConfig(stressPayload())
     // 只刷新 meta 取新的 saved_cfg_at，不再 applyDefaults，避免覆盖当前表单
     await store.load(true)
     notice.value = `配置已保存（${savedAt.value}），下次打开本页会沿用`
@@ -223,7 +230,7 @@ const submit = async () => {
   notice.value = ''
   submitting.value = true
   try {
-    const { run_id: runId } = await api.stressStart({ ...form })
+    const { run_id: runId } = await api.stressStart(stressPayload())
     // 列表先落地；导航被中止（旧构建的按需加载 chunk 失效）时整页跳转兜底
     loadRuns()
     await router.push(`/stress/${runId}`).catch(() => {})
@@ -401,10 +408,6 @@ onUnmounted(() => timer && clearInterval(timer))
           <span class="tip">支持 128000 / 128K / 1M（K=1000、M=1000000）</span>
         </div>
         <div class="field">
-          <label>输出长度（tokens）</label>
-          <input v-model.number="form.output_length" type="number" min="1" max="131072" />
-        </div>
-        <div class="field">
           <label>Prefix Cache 命中率</label>
           <input
             v-model.number="form.prefix_cache_ratio"
@@ -458,8 +461,12 @@ onUnmounted(() => timer && clearInterval(timer))
 
     <div class="grid mt">
       <div class="field">
-        <label>max_tokens</label>
-        <input v-model.number="form.max_tokens" type="number" min="1" max="131072" />
+        <label>输出长度（tokens）</label>
+        <input v-model.number="form.output_length" type="number" min="1" max="131072" />
+        <span class="tip">
+          两种模式共用：会话模式作为请求的 max_tokens 上限，长序列模式作为固定输出长度
+          （--min-tokens/--max-tokens），保证吞吐与 TPOT 口径一致
+        </span>
       </div>
       <div class="field">
         <label>temperature</label>
@@ -557,7 +564,7 @@ onUnmounted(() => timer && clearInterval(timer))
       </template>
       <template v-else>
         <StatTile label="对话轮数" :value="int(form.turns)" />
-        <StatTile label="单请求上限" :value="int(form.max_tokens)" sub="tokens" />
+        <StatTile label="输出长度" :value="int(form.output_length)" sub="tokens" />
       </template>
     </div>
 

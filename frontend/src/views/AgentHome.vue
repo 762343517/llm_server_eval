@@ -104,6 +104,7 @@ const applyDefaults = () => {
   const custom = d.data && !resolved ? d.data : ''
   Object.assign(form, {
     name: '',                      // 任务名称每个任务单独起名，不沿用上次
+    description: '',               // 说明同名称：描述本次任务，不沿用上次
     agent: d.agent || 'mini-swe-agent',
     endpoint: d.endpoint || '',
     api_key: d.api_key || '',
@@ -334,7 +335,13 @@ onUnmounted(() => timer && clearInterval(timer))
         <div class="field span-2">
           <label>任务名称（选填）</label>
           <input v-model.trim="form.name" type="text" placeholder="如 deepswe 冒烟测试；留空按「任务集 · agent」自动命名" />
-          <span class="tip">只用于任务列表展示，不参与评测；说明列由下面的配置自动生成</span>
+          <span class="tip">只用于任务列表展示，不参与评测</span>
+        </div>
+        <div class="field span-2">
+          <label>说明（选填）</label>
+          <input v-model.trim="form.description" type="text" maxlength="200"
+                 placeholder="如 GLM-5.3 冒烟复测；留空按任务集 · agent · 模型自动生成" />
+          <span class="tip">显示在下方任务列表的「说明」列，不参与评测</span>
         </div>
         <div class="field">
           <label>执行 agent</label>

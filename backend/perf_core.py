@@ -792,7 +792,9 @@ def build_command(cfg, run_dir, dataset_path=None):
     if prompt_mode(cfg) == MODE_LONG:
         cmd += _long_arguments(cfg)
     else:
-        cmd += ["--max-tokens", str(max(1, int(cfg.get("max_tokens") or 512))),
+        # 会话模式的 --max-tokens 与长序列模式的固定输出长度同源（output_length）：
+        # 否则页面按 output_length 统计吞吐、请求却只发 max_tokens，输出被提前截断
+        cmd += ["--max-tokens", str(output_length(cfg)),
                 "--max-prompt-length", str(MAX_PROMPT_LENGTH)]
     cmd += ["--temperature", str(float(cfg.get("temperature") or 0.0))]
     top_p = cfg.get("top_p")
@@ -859,7 +861,10 @@ def dump_args(cfg, run_dir, dataset_path=None):
         "dataset": dataset,
         "dataset_path": ds_path,
         "dataset_args": ds_args,
-        "max_tokens": cfg.get("max_tokens"),
+        # 输出长度只有一个口径：会话模式 = 请求的 max_tokens 上限，长序列模式 =
+        # 固定输出长度（--min-tokens/--max-tokens），两者都取 output_length()
+        "max_tokens": output_length(cfg),
+        "output_length": output_length(cfg),
         "temperature": cfg.get("temperature"),
         "top_p": cfg.get("top_p"),
         "top_k": cfg.get("top_k"),

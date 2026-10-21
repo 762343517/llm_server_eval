@@ -719,8 +719,8 @@ def _agent_cfg(payload):
         if not 0.01 <= value <= 100:
             raise HTTPException(400, "{}需在 0.01~100 之间".format(label))
     cfg = {
-        # 任务名称与说明：名称可留空（按「任务集 · agent」自动命名），说明始终由
-        # 表单配置生成，两者都随 meta.json 落盘，历史任务列表直接展示
+        # 任务名称与说明：名称可留空（按「任务集 · agent」自动命名）；说明留空时
+        # 按配置自动生成，填写后原样落盘（cfg.desc），列表直接展示
         "name": (payload.get("name") or "").strip()[:80],
         # 落盘记数据集名称而不是绝对路径：历史 run 曾记绝对路径，项目改名后
         # 解析不到任务目录，子任务看板直接 500（绝对路径另存在 summary.tasks_dir）
@@ -739,7 +739,9 @@ def _agent_cfg(payload):
         "verifier_timeout_multiplier": verifier_timeout,
     }
     cfg["name"] = cfg["name"] or agent_core.default_name(cfg)
-    cfg["desc"] = agent_core.describe_cfg(cfg)
+    # 说明优先用表单填写的文字，留空才按「任务集 · agent · 模型…」自动生成
+    cfg["desc"] = ((payload.get("description") or "").strip()[:200]
+                   or agent_core.describe_cfg(cfg))
     return cfg
 
 
