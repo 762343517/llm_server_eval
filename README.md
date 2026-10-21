@@ -206,6 +206,10 @@ pier 正常结束会执行 `docker compose down --rmi all`；中断场景（点�
 
 磁盘回收只针对 buildkit 构建缓存（阈值 `LLM_SERVER_EVAL_DOCKER_DISK_LIMIT_GB`，默认 200GB，超阈才清且要求当前没有 pier 任务在跑）：镜像不参与，`docker image prune -a` 会让下一轮 run 全部重新拉取。只有在系统盘可用空间低于 `LLM_SERVER_EVAL_DOCKER_MIN_FREE_GB`（默认 10GB）时清理悬空镜像（无 tag、无引用），带 tag 的镜像一律保留。
 
+主任务详情页的日志只收**主任务进程**的输出：pier 进程的 stdout（INFO 级进度）与平台自己的事件（`[镜像]` / `[命令]` / `[任务]` / `[判定]` / `[停止]` …）。pier 的 `job.log` 与各 trial 的 `trial.log` 不再转发——`job.log` 是 pier 的 DEBUG 文件（FileHandler=DEBUG、stdout=INFO），绝大多数行是单个 trial 容器内部的细节（agent 命令原文、任务指令正文等），会埋掉真正的调度信息；单个任务的完整日志在子任务详情页按需读取（`agent/mini-swe-agent.txt`，结束后为 `trial.log`）。
+
+由于收窄后构建镜像 / 起容器阶段 stdout 长时间没有新行，主任务日志加了**静默心跳**：超过 `consts.DEFAULT_AGENT_HEARTBEAT_SECONDS`（默认 180 秒，可用 `LLM_SERVER_EVAL_AGENT_HEARTBEAT` 覆盖，0 关闭、上限 3600）没有日志就补一行主进程级进度——准备阶段是 `[进度] 已运行 2m10s：准备中（拉取 / 构建镜像、起容器），尚无任务启动`，执行阶段是 `[进度] 已运行 41m05s：完成 12/65（通过 9，异常 1），运行中 3`。有正常输出时不额外刷屏。
+
 ### 6.3 任务集标识
 
 run 的 `cfg.data` 记的是**任务集标识**：登记在 `dataset/datasets.json` 的写名称（如 `deepswe`），未登记的自定义路径写绝对路径（见 `adapters/tasks.py::key_for`）。执行与看板一律经 `resolve_dir()` 解析成任务目录，因此项目改名/换机器后历史 run 仍可解析；早期 run 记录的旧工作区绝对路径（如 `.../zhipuEval/dataset/deepswe/tasks`）按 `dataset/` 之后的相对部分重定位到当前 `DATASET_DIR`（`rebase_dataset_path`），解析不出来时子任务看板退化成「只看磁盘」列出已跑子任务，不会整页报错。绝对路径仍完整保存在 `summary.tasks_dir`。

@@ -251,6 +251,23 @@ def image_pull_concurrency():
     return max(1, min(16, value))
 
 
+def agent_heartbeat_seconds():
+    """主任务日志的心跳间隔（秒），0 表示关闭。
+
+    构建镜像/起容器阶段 pier 只写 job.log 的 DEBUG，主任务日志不会有新行；静默超过这个
+    间隔就补一条主进程级进度，避免页面看起来像卡住。可用
+    LLM_SERVER_EVAL_AGENT_HEARTBEAT 覆盖（秒），上限 1 小时。
+    """
+    raw = os.environ.get("LLM_SERVER_EVAL_AGENT_HEARTBEAT")
+    try:
+        value = int(str(raw).strip()) if raw is not None and str(raw).strip() else None
+    except ValueError:
+        value = None
+    if value is None:
+        return max(0, consts.DEFAULT_AGENT_HEARTBEAT_SECONDS)
+    return max(0, min(3600, value))
+
+
 def is_docker_hub(image):
     """镜像是否归 Docker Hub —— 只有 Docker Hub 镜像才能套加速器前缀。
 
@@ -1218,43 +1235,13 @@ def verifier_tail(trial_dir, lines=6):
     return _tail_text(os.path.join(trial_dir, "verifier", "test-stdout.txt"), lines)
 
 
-def _pump_log(path, offset, on_event, max_lines=40):
-    """把单个日志文件的新增内容转成 task_log 事件，返回新的读取偏移。
-
-    每轮最多转发 max_lines 行，避免长日志与高频进度输出把内存和前端拖慢。
-    """
-    if not path or not os.path.isfile(path):
-        return offset
-    size = os.path.getsize(path)
-    if size <= offset:
-        return offset
-    try:
-        with open(path, encoding="utf-8", errors="replace") as fh:
-            fh.seek(offset)
-            for count, line in enumerate(fh):
-                if count >= max_lines:
-                    break
-                text = clean_log_line(line)
-                if text:
-                    on_event("task_log", {"msg": text})
-            return fh.tell()
-    except OSError:
-        return offset
-
-
-def _pump_logs(job_dir, offsets, on_event, max_lines=40):
-    """轮询 job 目录：pier 自身的 job.log 与各 trial 的 trial.log。"""
-    paths = [os.path.join(job_dir, "job.log")]
-    try:
-        entries = os.listdir(job_dir)
-    except OSError:
-        entries = []
-    for entry in entries:
-        candidate = os.path.join(job_dir, entry, "trial.log")
-        if os.path.isfile(candidate):
-            paths.append(candidate)
-    for path in paths:
-        offsets[path] = _pump_log(path, offsets.get(path, 0), on_event, max_lines)
+# 主任务详情页的日志只收「主任务进程」的输出：pier 进程的 stdout（INFO 级进度）加上平台
+# 自己发的事件（[镜像]/[命令]/[任务]/[判定]/[停止]…）。曾经额外把 job.log 与各 trial 的
+# trial.log 增量转发过来，但 pier 的 job.log 是它自己的 DEBUG 文件（FileHandler=DEBUG、
+# stdout=INFO），绝大多数行是单个 trial 容器内部的细节——agent 的 RUN 命令原文、任务指令
+# 正文、`Skipping image OS validation for hb__<task>__…` 之类，逐行刷到主页面会把真正的
+# 调度信息埋掉；而每个 trial 的完整日志本来就由子任务详情页按需读取（trial_log_rel）。
+# 因此这里不再做文件转发，主页面只保留主进程日志。
 
 
 def _terminate(proc, grace=25.0):
@@ -1728,19 +1715,23 @@ def run_agent_eval(cfg, on_event=None, should_stop=None):
                             errors="replace", bufsize=1, start_new_session=True)
     records = {}
     seen_running = set()
-    log_offsets = {}
     stdout_tail = collections.deque(maxlen=LOG_TAIL_LINES)
     done = errors = resolved = steps = tokens = 0
+    running_now = 0                       # 最近一次扫描里「目录已建、还没出结果」的 trial 数
     stopped = False
     last_emit = 0.0
+    heartbeat = agent_heartbeat_seconds()
+    last_activity = started               # 最近一次有日志输出的时间（心跳按它判断静默）
 
     def read_stdout():
         """pier 的实时输出必须持续读走，否则管道写满会把子进程卡死。"""
+        nonlocal last_activity
         try:
             for line in proc.stdout:
                 stdout_tail.append(line.rstrip())
                 text = clean_log_line(line)
                 if text:
+                    last_activity = time.time()
                     on_event("task_log", {"msg": text})
         except (OSError, ValueError):        # 进程被强杀时管道可能已关闭
             return
@@ -1762,14 +1753,44 @@ def run_agent_eval(cfg, on_event=None, should_stop=None):
             "cached": 0, "todo": len(selected),
         })
 
+    def beat(force=False):
+        """静默太久就补一行主进程级进度，返回是否真的发了一条。
+
+        为什么需要：主任务日志现在只收主进程输出，而 pier 在构建镜像、起容器的阶段只往
+        job.log 写 DEBUG，stdout 上很长时间没有新行——页面看起来像卡死。这条心跳只报
+        主进程自己的状态（耗时、完成数、运行中数），不碰任何容器内容。
+        """
+        nonlocal last_activity
+        if heartbeat <= 0:
+            return False
+        now = time.time()
+        if not force and now - last_activity < heartbeat:
+            return False
+        last_activity = now
+        span = int(max(now - started, 0))
+        hours, rest = divmod(span, 3600)
+        minutes, seconds = divmod(rest, 60)
+        used = ("{}h{:02d}m".format(hours, minutes) if hours
+                else "{}m{:02d}s".format(minutes, seconds))
+        if not running_now and not done:
+            msg = ("[进度] 已运行 {}：准备中（拉取 / 构建镜像、起容器），"
+                   "尚无任务启动".format(used))
+        else:
+            msg = ("[进度] 已运行 {}：完成 {}/{}（通过 {}，异常 {}），运行中 {}".format(
+                used, done, len(selected), resolved, errors, running_now))
+        on_event("task_log", {"msg": msg})
+        return True
+
     def collect():
         """扫出新完成的 trial；首次见到 trial 目录时补一条启动日志。"""
-        nonlocal done, errors, resolved, steps, tokens
+        nonlocal done, errors, resolved, steps, tokens, last_activity, running_now
         finished, running = scan_trials(job_dir)
+        running_now = len(running)              # 目录已建、还没出结果，就是当前正在跑的任务
         for trial in running:
             if trial in seen_running:
                 continue
             seen_running.add(trial)
+            last_activity = time.time()
             name = trial_task(trial, meta_by_name)
             on_event("task_start", {"index": len(seen_running), "task_id": name,
                                     "title": (meta_by_name.get(name) or {}).get("title", "")})
@@ -1786,6 +1807,7 @@ def run_agent_eval(cfg, on_event=None, should_stop=None):
             record["verifier_tail"] = verifier_tail(path)
             records[trial] = record
             fresh.append(record)
+            last_activity = time.time()
             done += 1
             steps += record["steps"]
             tokens += (record["input_tokens"] + record["output_tokens"]
@@ -1801,11 +1823,11 @@ def run_agent_eval(cfg, on_event=None, should_stop=None):
 
     try:
         while True:
-            _pump_logs(job_dir, log_offsets, on_event)
             fresh = collect()
             for record in fresh:
                 on_event("task_done", record)
             emit_progress(force=bool(fresh))
+            beat()
             if proc.poll() is not None:
                 break
             if should_stop():
@@ -1823,7 +1845,6 @@ def run_agent_eval(cfg, on_event=None, should_stop=None):
             except OSError:
                 pass
         reader.join(timeout=5)
-        _pump_logs(job_dir, log_offsets, on_event)
         for record in collect():
             on_event("task_done", record)
         emit_progress(force=True)

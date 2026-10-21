@@ -84,6 +84,11 @@ DEFAULT_AGENT_SEED = 0
 DEFAULT_AGENT_TIMEOUT_MULTIPLIER = 1.0
 DEFAULT_AGENT_VERIFIER_TIMEOUT_MULTIPLIER = 1.0
 DEFAULT_AGENT_POLL_SECONDS = 3.0      # 轮询 pier 结果文件的间隔
+# 主任务日志的心跳间隔（秒）：pier 在构建镜像 / 起容器阶段只往 job.log 写 DEBUG，
+# 主任务日志（只收主进程输出）会长时间没有新行，页面上看不出是在跑还是卡死。
+# 静默超过这个间隔就补一行主进程级进度（耗时、完成数、运行中数）。0 表示关闭心跳。
+# 可用 LLM_SERVER_EVAL_AGENT_HEARTBEAT 覆盖。
+DEFAULT_AGENT_HEARTBEAT_SECONDS = 180
 
 # 任务镜像（如 alexgshaw/xxx:tag）直连 registry-1.docker.io 在内网会超时。这里按顺序尝试
 # 镜像加速器：先拉 `<加速器>/<原镜像>`，再 tag 回任务声明的原名（pier 只认原名）。
