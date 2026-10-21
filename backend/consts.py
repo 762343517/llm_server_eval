@@ -102,7 +102,11 @@ DEFAULT_IMAGE_PULL_TIMEOUT = 600      # 单个镜像拉取上限（秒）：镜�
 # 实测一次批量评测就把 437G 系统盘占满（镜像 223GB + 构建缓存 243GB）。
 # 策略：docker 占用（镜像 + 构建缓存）超过阈值才回收，回收后自动重建 uv-base。
 # 设 0 表示关闭自动回收。可用 LLM_SERVER_EVAL_DOCKER_DISK_LIMIT_GB 覆盖。
-DEFAULT_DOCKER_DISK_LIMIT_GB = 50
+# 与 buildkit 自回收的分工：/etc/docker/daemon.json 里配了
+# `builder.gc.defaultKeepStorage = 200GB`，缓存由 buildkit 自己压在 200G 以内；
+# 本阈值对齐到同一个数，常态下应用层不动手（避免把 buildkit 辛苦复用的缓存全清），
+# 只有总占用真超 200G（或 buildkit GC 没生效）才兜底强清。
+DEFAULT_DOCKER_DISK_LIMIT_GB = 200
 
 # 回收时必须保住的镜像：pier 生成的 Dockerfile 固定用 `COPY --from=<uv-base>` 预置 uv，
 # 该镜像被 prune 掉会让所有任务构建直接失败（`COPY --from` 拉不到，见 develop.md §H.1）。
