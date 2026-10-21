@@ -14,6 +14,7 @@ Agent 类数据集的「一行」不是问答题，而是一个任务目录：�
 import os
 import random
 
+import consts
 import dataset_registry
 import utils
 
@@ -57,6 +58,27 @@ def directory(item=None):
     return ((item or {}).get("agent") or {}).get("tasks_dir", "")
 
 
+def rebase_dataset_path(path):
+    """把旧工作区遗留的绝对数据集路径改指到当前 dataset 目录。
+
+    历史 run 的 cfg.data 落盘的是发起时的**绝对路径**（例如项目目录还叫 zhipuEval
+    时的 /home/<user>/prj/zhipuEval/dataset/deepswe/tasks）。项目改名或搬到别的机器
+    后该路径失效，子任务看板这类只读接口会直接报「任务目录不存在」。这里取路径里
+    dataset 之后的相对部分，按当前 DATASET_DIR 重新拼接，且只在新路径确实存在时采用。
+    """
+    parts = [p for p in str(path or "").split(os.sep) if p]
+    if "dataset" not in parts:
+        return ""
+    rel = parts[len(parts) - 1 - parts[::-1].index("dataset") + 1:]
+    if not rel:
+        return ""
+    candidate = os.path.join(consts.DATASET_DIR, *rel)
+    nested = os.path.join(candidate, "tasks")
+    if os.path.isdir(nested):
+        return nested
+    return candidate if os.path.isdir(candidate) else ""
+
+
 def resolve_dir(path):
     """把页面/配置里的路径解析成「任务目录集合」所在目录。
 
@@ -67,9 +89,27 @@ def resolve_dir(path):
     item = dataset_registry.find(key)
     if item and item.get("agent"):
         return item["agent"]["tasks_dir"]
-    if key and os.path.isdir(key) and os.path.isdir(os.path.join(key, "tasks")):
-        return os.path.join(key, "tasks")
-    return key
+    if key and os.path.isdir(key):
+        nested = os.path.join(key, "tasks")
+        return nested if os.path.isdir(nested) else key
+    return rebase_dataset_path(key) or key
+
+
+def key_for(path="", directory=""):
+    """把任务集标识归一化成「可落盘的 key」。
+
+    登记在 datasets.json 里的任务集优先记**名称**（如 deepswe）：这样 run 配置与
+    工作区位置解耦，项目改名或换机器后历史任务仍能解析（曾经直接落绝对路径，
+    目录一变子任务看板就整页 500）。未登记的自定义路径只能原样记绝对路径。
+    """
+    item = dataset_registry.find(path)
+    if item and item.get("agent"):
+        return item["name"]
+    target = str(directory or "").strip() or str(resolve_dir(path) or "").strip()
+    for it in catalog():
+        if (it.get("agent") or {}).get("tasks_dir") == target:
+            return it["name"]
+    return os.path.abspath(target) if target else ""
 
 
 def label(directory_path):

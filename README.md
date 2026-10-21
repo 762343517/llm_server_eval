@@ -202,6 +202,10 @@ pier 正常结束会执行 `docker compose down --rmi all`；中断场景（点�
 
 回收不删镜像 tag（与 pier 的 `--rmi all` 不同），下一轮可直接复用，省一次 pull。
 
+### 6.3 任务集标识
+
+run 的 `cfg.data` 记的是**任务集标识**：登记在 `dataset/datasets.json` 的写名称（如 `deepswe`），未登记的自定义路径写绝对路径（见 `adapters/tasks.py::key_for`）。执行与看板一律经 `resolve_dir()` 解析成任务目录，因此项目改名/换机器后历史 run 仍可解析；早期 run 记录的旧工作区绝对路径（如 `.../zhipuEval/dataset/deepswe/tasks`）按 `dataset/` 之后的相对部分重定位到当前 `DATASET_DIR`（`rebase_dataset_path`），解析不出来时子任务看板退化成「只看磁盘」列出已跑子任务，不会整页报错。绝对路径仍完整保存在 `summary.tasks_dir`。
+
 ## 7. 压力测试（EvalScope 集成）
 
 ### 7.1 依赖与探测

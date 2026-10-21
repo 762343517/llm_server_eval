@@ -622,12 +622,21 @@ class StressManager:
         return snap
 
     def records(self, run_id):
-        """读取磁盘上的逐请求结果（运行中也可安全读取，evalscope 逐行提交结果库）。"""
+        """逐请求明细：运行中的任务直接返回内存里的实时记录，不再读结果库。
+
+        结果库是 rollback journal，单行近 1MB 时整库读取要按秒计（冷缓存实测
+        518 行 / 434MB 约 5.2s），正好撞上 evalscope 5s 的 busy_timeout，会让它的
+        `con.commit()` 抛 "database is locked" 并中断整轮压测。内存里的记录由
+        `_read_new()` 边跑边累积，与进度/汇总同源，因此运行中只读内存。
+        """
         if not rm.RUN_ID_RE.match(run_id or ""):
             return []
         run_dir = os.path.join(self.base, run_id)
         with self._lock:
             state = self._states.get(run_id)
+        if state is not None and not state.deleted and state.status in ("queued", "running"):
+            with state.lock:
+                return list(state.records)
         cfg = state.cfg if state is not None else {}
         records, _ = perf_core.read_records(run_dir, cfg, run_id)
         return records

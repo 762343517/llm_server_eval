@@ -92,17 +92,23 @@ const queueText = computed(() => {
 
 const applyDefaults = () => {
   const d = store.agentDefaults
-  // 上次保存的任务集可能来自「自定义任务集路径」（不在下拉候选里），此时回填到自定义框，
-  // 否则下拉框会显示空白
+  // 上次保存的任务集：后端登记过的记的是数据集名称（见 adapters.tasks.key_for），
+  // 未登记的自定义路径才是绝对路径。统一换算成下拉框的 tasks_dir 值，
+  // 换算不出来（自定义路径）就回填到自定义框，否则下拉框会显示空白
   const known = datasets.value.map((x) => (x.agent || {}).tasks_dir)
-  const custom = d.data && !known.includes(d.data) ? d.data : ''
+  const byKey = (key) => {
+    const hit = datasets.value.find((x) => x.name === key || (x.agent || {}).tasks_dir === key)
+    return hit ? (hit.agent || {}).tasks_dir || '' : ''
+  }
+  const resolved = d.data ? byKey(d.data) : ''
+  const custom = d.data && !resolved ? d.data : ''
   Object.assign(form, {
     agent: d.agent || 'mini-swe-agent',
     endpoint: d.endpoint || '',
     api_key: d.api_key || '',
     model: d.model || '',
     model_class: d.model_class || 'litellm',
-    data: custom ? known[0] || '' : d.data || '',
+    data: custom ? known[0] || '' : (resolved || d.data || ''),
     data_custom: custom,
     tasks: '',
     limit: d.limit ?? 1,

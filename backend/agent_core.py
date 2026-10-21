@@ -443,6 +443,11 @@ def resolve_tasks_dir(path):
     return adapters.tasks.resolve_dir(path)
 
 
+def tasks_key(data, directory=""):
+    """run 配置里落盘的任务集标识：登记过的记名称，自定义路径记绝对路径。"""
+    return adapters.tasks.key_for(data, directory)
+
+
 # 数值兜底统一收敛到 utils（原先 api / agent_core / perf_core 各写一份）
 _num = utils.float_or
 
@@ -981,7 +986,12 @@ def read_log_slice(path, offset=-1, max_lines=200, max_bytes=256 * 1024):
 
 def list_subtasks(cfg, out):
     """子任务看板：计划清单 × pier 目录的实时状态。"""
-    _, catalogue, selected = resolve_selection(cfg, use_cache=True)
+    try:
+        _, catalogue, selected = resolve_selection(cfg, use_cache=True)
+    except RuntimeError:
+        # 计划清单解析不出来（数据集目录被删/改名、任务名已下线）时不能让看板整体 500：
+        # 退化成「只看磁盘」，把已完成/在跑的子任务照样列出来，等待项自然缺失。
+        catalogue, selected = [], []
     meta_by_name = {t["name"]: t for t in catalogue}
     job_dir = _job_dir(out)
     finished, running = scan_trials(job_dir)
@@ -997,6 +1007,10 @@ def list_subtasks(cfg, out):
         done_by_task[name] = record
     run_by_task = {trial_task(trial, meta_by_name): os.path.join(job_dir, trial)
                    for trial in running}
+    if not selected and (done_by_task or run_by_task):
+        # 计划清单缺失时的兜底：按磁盘上出现过的任务名还原行，顺序沿用 pier 目录顺序
+        selected = [{"name": name}
+                    for name in list(dict.fromkeys(list(done_by_task) + list(run_by_task)))]
 
     now = time.time()
     rows = []

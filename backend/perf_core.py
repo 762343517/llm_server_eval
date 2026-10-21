@@ -87,8 +87,16 @@ DB_COMMIT_INTERVAL = 1
 # 每次轮询都要扫全表、长时间持有 SHARED 锁，evalscope 的 `con.commit()` 等不到
 # EXCLUSIVE 锁就抛 "sqlite3.OperationalError: database is locked" 并中断整轮压测。
 # 因此按 rowid 做 keyset 分页、只读需要的列、单次限量，把每个读事务压到毫秒级。
-READ_BATCH = 512
+#
+# 批大小按「一行 ~1MB」定：`request` 是表的第 1 列，任何后续列都要顺着该行的溢出页链
+# 跳过去，冷缓存下实测约 10ms/行（518 行 / 434MB 的库全读 5.2s）。批 512 行时单个读
+# 事务就有 5s，正好等于 evalscope 的 busy_timeout，仍会把它的 commit 堵死；批 64 行
+# 约 0.6s，留足安全边界。会话模式行很小，64 行仍是毫秒级。
+READ_BATCH = 64
 READ_TIMEOUT = 0.5
+# 一次增量调用内最多连续读多久（秒）：读完一批就检查预算，超了留到下一轮轮询，
+# 避免短上下文高 RPS 时积压的行数把单次调用拖长。
+READ_BUDGET = 0.25
 # unique_prefix 打开时，每条请求注入的随机前缀长度（字符）
 UNIQUE_PREFIX_CHARS = 1024
 # 单条 prompt 的长度上限（字符，evalscope 默认值）
@@ -1058,6 +1066,7 @@ def read_records(run_dir, cfg=None, run_id="", after=None):
     records = []
     anchor = _time_anchor()
     columns = _read_columns(cfg)
+    started = time.monotonic()
     for level, path in _result_dbs(run_dir):
         last = int(cursor.get(path) or 0)
         while True:
@@ -1069,8 +1078,10 @@ def read_records(run_dir, cfg=None, run_id="", after=None):
             for row in rows:
                 records.append(_record(row, level, cfg, run_id, anchor,
                                        int(row["_rid"])))
-            # 运行中的增量读取一次只读一批，剩下的交给下一轮轮询
-            if incremental or len(rows) < READ_BATCH:
+            if len(rows) < READ_BATCH:
+                break
+            # 增量读取按时间预算收尾：每批都是独立短事务，剩下的交给下一轮轮询
+            if incremental and time.monotonic() - started >= READ_BUDGET:
                 break
     return records, cursor
 

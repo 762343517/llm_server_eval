@@ -715,7 +715,9 @@ def _agent_cfg(payload):
         if not 0.01 <= value <= 100:
             raise HTTPException(400, "{}需在 0.01~100 之间".format(label))
     cfg = {
-        "data": directory,
+        # 落盘记数据集名称而不是绝对路径：历史 run 曾记绝对路径，项目改名后
+        # 解析不到任务目录，子任务看板直接 500（绝对路径另存在 summary.tasks_dir）
+        "data": agent_core.tasks_key(data, directory),
         "agent": agent_name,
         "endpoint": endpoint,
         "api_key": (payload.get("api_key") or "").strip(),
