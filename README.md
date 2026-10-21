@@ -202,6 +202,8 @@ pier 正常结束会执行 `docker compose down --rmi all`；中断场景（点�
 
 回收不删镜像 tag（与 pier 的 `--rmi all` 不同），下一轮可直接复用，省一次 pull。
 
+磁盘回收只针对 buildkit 构建缓存（阈值 `LLM_SERVER_EVAL_DOCKER_DISK_LIMIT_GB`，默认 200GB，超阈才清且要求当前没有 pier 任务在跑）：镜像不参与，`docker image prune -a` 会让下一轮 run 全部重新拉取。只有在系统盘可用空间低于 `LLM_SERVER_EVAL_DOCKER_MIN_FREE_GB`（默认 10GB）时清理悬空镜像（无 tag、无引用），带 tag 的镜像一律保留。
+
 ### 6.3 任务集标识
 
 run 的 `cfg.data` 记的是**任务集标识**：登记在 `dataset/datasets.json` 的写名称（如 `deepswe`），未登记的自定义路径写绝对路径（见 `adapters/tasks.py::key_for`）。执行与看板一律经 `resolve_dir()` 解析成任务目录，因此项目改名/换机器后历史 run 仍可解析；早期 run 记录的旧工作区绝对路径（如 `.../zhipuEval/dataset/deepswe/tasks`）按 `dataset/` 之后的相对部分重定位到当前 `DATASET_DIR`（`rebase_dataset_path`），解析不出来时子任务看板退化成「只看磁盘」列出已跑子任务，不会整页报错。绝对路径仍完整保存在 `summary.tasks_dir`。

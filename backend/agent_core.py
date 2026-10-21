@@ -1329,9 +1329,9 @@ def reclaim_orphans(runs_dir, on_event=None):
 
 # ------------------------------------------------------------------ 磁盘回收
 # 与上面容器回收的分工：reclaim_orphans 只管容器/网络/卷（pier 被中断时的残留），
-# 这里管镜像层与 buildkit 缓存——那部分 pier 的 `compose down --rmi all` 只撤 tag，
-# 层仍留在 /var/lib/containerd；而容器回收又刻意保留 tag 省 pull（见 clean_up 处注释），
-# 于是 docker 占用只进不出。必须按占用阈值主动回收，否则系统盘会被批量评测占满。
+# 这里只管 buildkit 构建缓存——pier 的 `compose down --rmi all` 只撤 tag，构建层
+# 仍留在 /var/lib/containerd，批量评测会把它堆到占满系统盘。镜像不清理：撤 tag 后
+# 的镜像仍在本地，删掉会让下一轮 run 全部重新 pull（见 reclaim_disk）。
 _SIZE_UNITS = {"B": 1, "KB": 1024, "MB": 1024 ** 2, "GB": 1024 ** 3, "TB": 1024 ** 4}
 # `image prune` 输出 "Total reclaimed space: 223.1GB"，`builder prune` 输出 "Total:\t241.9GB"，
 # 两种尾部汇总都要能抓到，否则回收量恒为 0
@@ -1357,29 +1357,62 @@ def _fmt_bytes(size):
     return "{:.0f}MB".format(size / 1024 ** 2)
 
 
-def docker_disk_usage():
-    """docker 当前占用字节数（镜像 + 构建缓存）；docker 不可用时返回 0。
+def _docker_df():
+    """解析 `docker system df`，返回 (镜像占用字节, 构建缓存占用字节)。
 
-    只统计这两类：容器/卷由 reclaim_orphans 负责，且本地卷默认不占镜像层。
+    只取这两类：容器/卷由 reclaim_orphans 负责，且本地卷默认不占镜像层。
     """
     rc, out = _docker(["docker", "system", "df", "--format", "{{.Type}}|{{.Size}}"],
                       timeout=60)
     if rc != 0:
-        return 0
-    total = 0
+        return 0, 0
+    images = cache = 0
     for line in out.splitlines():
         kind, _, size = line.partition("|")
-        if kind.strip() in ("Images", "Build Cache"):
-            total += _parse_size(size)
-    return total
+        kind = kind.strip()
+        if kind == "Images":
+            images += _parse_size(size)
+        elif kind == "Build Cache":
+            cache += _parse_size(size)
+    return images, cache
+
+
+def docker_disk_usage():
+    """docker 当前占用字节数（镜像 + 构建缓存）；docker 不可用时返回 0。"""
+    images, cache = _docker_df()
+    return images + cache
+
+
+def docker_build_cache_usage():
+    """buildkit 构建缓存占用字节数；docker 不可用时返回 0。"""
+    return _docker_df()[1]
 
 
 def docker_disk_limit():
-    """回收阈值（字节）：环境变量可覆盖，0 表示关闭自动回收。"""
+    """构建缓存回收阈值（字节）：环境变量可覆盖，0 表示关闭自动回收。
+
+    只约束 build cache，镜像占用不计入——删镜像会让下一轮 run 全部重新 pull。
+    """
     raw = os.environ.get("LLM_SERVER_EVAL_DOCKER_DISK_LIMIT_GB")
     value = utils.float_or(raw, consts.DEFAULT_DOCKER_DISK_LIMIT_GB) \
         if raw is not None else consts.DEFAULT_DOCKER_DISK_LIMIT_GB
     return int(max(0.0, value) * 1024 ** 3)
+
+
+def docker_min_free():
+    """系统盘可用空间下限（字节）：低于该值才允许清悬空镜像。"""
+    raw = os.environ.get("LLM_SERVER_EVAL_DOCKER_MIN_FREE_GB")
+    value = utils.float_or(raw, consts.DEFAULT_DOCKER_MIN_FREE_GB) \
+        if raw is not None else consts.DEFAULT_DOCKER_MIN_FREE_GB
+    return int(max(0.0, value) * 1024 ** 3)
+
+
+def disk_free():
+    """docker 数据目录所在分区（/）的可用字节数；取不到时返回 -1。"""
+    try:
+        return shutil.disk_usage("/").free
+    except OSError:
+        return -1
 
 
 def pier_uv_base_image():
@@ -1418,9 +1451,9 @@ def pier_uv_base_image():
 def ensure_uv_base(on_event=None):
     """确认 pier 依赖的 uv-base 基础镜像存在，缺失就地重建（约 175MB，只走 PyPI）。
 
-    打过补丁的 pier 生成的 Dockerfile 固定 `COPY --from=<uv-base>`，该镜像被 prune 掉
-    会让所有任务构建失败。而 docker 的 prune 没有「排除指定镜像」的过滤器，所以回收后
-    必须补回来。重建配方见 develop.md 2026-10-19 §F/§I。
+    打过补丁的 pier 生成的 Dockerfile 固定 `COPY --from=<uv-base>`，该镜像缺失会让所有
+    任务构建失败。自动回收不清有 tag 的镜像，正常不会缺失；清理悬空镜像或人工删过之后
+    由此补回。重建配方见 develop.md §6.1。
     """
     emit = on_event or (lambda kind, payload=None: None)
     image = pier_uv_base_image()
@@ -1480,19 +1513,26 @@ def ensure_uv_base(on_event=None):
 
 
 def reclaim_disk(on_event=None, force=False):
-    """按占用阈值回收 docker 镜像层与 buildkit 缓存，返回回收摘要 dict。
+    """按阈值回收 buildkit 构建缓存，返回回收摘要 dict。镜像不参与自动清理。
+
+    只清构建缓存的理由：`docker image prune -a` 会把本地任务镜像全删掉（pier 撤
+    tag 后它们都没有容器引用），下一轮 run 必须逐个重新 pull/build；而反复增长的
+    只有构建缓存（pier 的 `compose down --rmi all` 只撤 tag，层留在
+    /var/lib/containerd）。
 
     两个前置条件（都不满足就不动手）：
-      * 占用超阈值才清——不然用户自己拉的镜像会被无故清空，阈值见
-        consts.DEFAULT_DOCKER_DISK_LIMIT_GB / LLM_SERVER_EVAL_DOCKER_DISK_LIMIT_GB；
-      * 没有 pier 任务在跑才清——prune -a 会删掉正在跑的任务镜像，等于把 run 打断。
+      * 构建缓存超阈值——阈值见 consts.DEFAULT_DOCKER_DISK_LIMIT_GB /
+        LLM_SERVER_EVAL_DOCKER_DISK_LIMIT_GB，镜像占用不计入；
+      * 没有 pier 任务在跑——清缓存会让当前 run 的重建失去复用。
 
-    顺序固定为 构建缓存 -> 镜像：前者不动任何镜像，先清它往往就够了，还能在磁盘
-    接近写满时先腾出重建 uv-base 的空间（磁盘满时连 docker build 都会失败）。
+    镜像只在系统盘可用空间低于 consts.DEFAULT_DOCKER_MIN_FREE_GB 时清悬空镜像
+    （`docker image prune -f`，不带 -a）：悬空镜像没有 tag、无法被引用，删除不影响
+    有 tag 镜像的复用；`image prune -a` 不出现在任何自动流程里。
     """
     emit = on_event or (lambda kind, payload=None: None)
     result = {"ran": False, "reason": "", "before": 0, "after": 0,
-              "builder": 0, "images": 0, "uv_base": None}
+              "before_cache": 0, "after_cache": 0, "builder": 0,
+              "images": 0, "uv_base": None}
     docker = docker_state()
     if not docker["ok"]:
         result["reason"] = "docker 不可用"
@@ -1502,15 +1542,17 @@ def reclaim_disk(on_event=None, force=False):
         result["reason"] = "自动回收已关闭（阈值 0）"
         return result
 
-    before = docker_disk_usage()
-    result["before"] = before
-    if not force and before <= limit:
-        result["after"] = before
-        result["reason"] = "占用 {} 未超阈值 {}".format(_fmt_bytes(before), _fmt_bytes(limit))
+    images, cache = _docker_df()
+    result["before"] = images + cache
+    result["before_cache"] = cache
+    result["after"] = result["before"]
+    result["after_cache"] = cache
+    if not force and cache <= limit:
+        result["reason"] = "构建缓存 {} 未超阈值 {}（镜像 {} 不计入）".format(
+            _fmt_bytes(cache), _fmt_bytes(limit), _fmt_bytes(images))
         return result
     if active_pier_jobs():
-        result["after"] = before
-        result["reason"] = "有 pier 任务在跑，跳过以免误删在用镜像"
+        result["reason"] = "有 pier 任务在跑，跳过以免当前 run 的重建失去复用"
         return result
 
     result["ran"] = True
@@ -1520,19 +1562,25 @@ def reclaim_disk(on_event=None, force=False):
     if rc == 0:
         emit("task_log", {"msg": "[回收] 清理构建缓存 {}".format(_fmt_bytes(result["builder"]))})
 
-    if docker_disk_usage() > limit:
-        rc, out = _docker(["docker", "image", "prune", "-a", "-f"], timeout=900)
+    free = disk_free()
+    if force or (0 <= free < docker_min_free()):
+        # 只清悬空镜像：有 tag 的任务镜像与 uv-base 保留，下一次 run 不必重新 pull
+        rc, out = _docker(["docker", "image", "prune", "-f"], timeout=900)
         match = _RECLAIMED_RE.search(out) if rc == 0 else None
         result["images"] = _parse_size(match.group(1)) if match else 0
         if rc == 0:
-            emit("task_log", {"msg": "[回收] 清理未使用镜像 {}".format(
-                _fmt_bytes(result["images"]))})
-        # uv-base 没有 prune 排除过滤器，只能清完补回来（pier 不注入时是空操作）
+            emit("task_log", {"msg": "[回收] 清理悬空镜像 {}（可用空间 {}）".format(
+                _fmt_bytes(result["images"]),
+                _fmt_bytes(free) if free >= 0 else "未知")})
+        # 悬空镜像清理不会动有 tag 的 uv-base，这里只是兜底确认（通常为空操作）
         result["uv_base"] = ensure_uv_base(on_event)
 
-    result["after"] = docker_disk_usage()
-    emit("task_log", {"msg": "[回收] docker 占用 {} → {}".format(
-        _fmt_bytes(before), _fmt_bytes(result["after"]))})
+    after_images, after_cache = _docker_df()
+    result["after"] = after_images + after_cache
+    result["after_cache"] = after_cache
+    emit("task_log", {"msg": "[回收] 构建缓存 {} → {}，docker 总占用 {} → {}".format(
+        _fmt_bytes(result["before_cache"]), _fmt_bytes(result["after_cache"]),
+        _fmt_bytes(result["before"]), _fmt_bytes(result["after"]))})
     return result
 
 
@@ -1583,8 +1631,9 @@ def run_agent_eval(cfg, on_event=None, should_stop=None):
     argv, shown = build_command(cfg, directory, [t["name"] for t in selected],
                                 jobs_dir, job_name)
     on_event("task_log", {"msg": "[命令] " + shown})
-    # 拉镜像前先按阈值回收：批量评测会把镜像层与 buildkit 缓存堆到占满系统盘，
-    # 满了以后 docker pull / build 都会失败，整轮 run 会退化成「环境错误」
+    # 开跑前按阈值清一次构建缓存：批量评测会把它堆到占满系统盘，满了以后
+    # docker pull / build 都会失败，整轮 run 会退化成「环境错误」。
+    # 镜像不动（只清缓存），已有 tag 的镜像下一轮可直接复用。
     reclaim_disk(on_event=on_event)
     pending_images = [t for t in selected if not t["image_ready"] and t["docker_image"]]
     if pending_images:

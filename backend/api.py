@@ -44,13 +44,13 @@ WEBUI_DIR = runtime_paths.webui_dir()
 accuracy = run_manager.RunManager()
 stress = perf_manager.StressManager()
 def _agent_worker(cfg, on_event=None, should_stop=None):
-    """跑一轮 Agent 评测，收尾时按阈值回收 docker 镜像层与构建缓存。
+    """跑一轮 Agent 评测，收尾时按阈值回收 buildkit 构建缓存。
 
     pier 每个 trial 结束会自己 `compose down --rmi all`，容器不会残留；但那条命令
-    只撤镜像 tag，构建层与 buildkit 缓存仍留在 /var/lib/containerd，一轮批量评测
-    （200+ 任务）就能堆到上百 GB。原先只在「服务启动」和「下一轮开跑前」回收，
-    跑完到下次启动之间的空窗期磁盘只增不减，所以这里补一次收尾回收。
-    reclaim_disk 自己会判阈值、并且有 pier 在跑时跳过，不会误删在用镜像。
+    只撤镜像 tag，构建层与缓存仍留在 /var/lib/containerd，一轮批量评测（200+ 任务）
+    就能堆到上百 GB。原先只在「服务启动」和「下一轮开跑前」回收，跑完到下次启动
+    之间的空窗期磁盘只增不减，所以这里补一次收尾回收。
+    reclaim_disk 只清构建缓存、不动镜像，并且有 pier 在跑时跳过。
     """
     try:
         return agent_core.run_agent_eval(cfg, on_event=on_event,
@@ -83,8 +83,8 @@ async def lifespan(_app):
     # 不阻塞启动（只处理终态 run，正在跑的 run 的容器不受影响）
     threading.Thread(target=agent_core.reclaim_orphans, args=(agent.runs_dir,),
                      name="reclaim-orphans", daemon=True).start()
-    # 镜像层与 buildkit 缓存靠 pier 的 `compose down --rmi all` 是清不掉的（只撤 tag），
-    # 启动兜底一次：占用超阈值才真动手，没任务在跑才敢删
+    # 构建缓存靠 pier 的 `compose down --rmi all` 是清不掉的（只撤 tag），启动兜底一次：
+    # 缓存超阈值才真动手，没任务在跑才敢清；镜像不参与（删了会让下轮全部重新 pull）
     threading.Thread(target=agent_core.reclaim_disk,
                      kwargs={"on_event": _reclaim_log},
                      name="reclaim-disk", daemon=True).start()

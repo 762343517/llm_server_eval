@@ -100,17 +100,24 @@ DEFAULT_IMAGE_PULL_TIMEOUT = 600      # 单个镜像拉取上限（秒）：镜�
 # 只做 `compose down --rmi all`（撤 tag，镜像层仍留在 /var/lib/containerd），
 # 而 agent_core 的容器回收又刻意保留镜像 tag 省 pull。三者叠加使 docker 占用只进不出：
 # 实测一次批量评测就把 437G 系统盘占满（镜像 223GB + 构建缓存 243GB）。
-# 策略：docker 占用（镜像 + 构建缓存）超过阈值才回收，回收后自动重建 uv-base。
-# 设 0 表示关闭自动回收。可用 LLM_SERVER_EVAL_DOCKER_DISK_LIMIT_GB 覆盖。
+# 策略：只回收 buildkit 构建缓存，镜像不动。`docker image prune -a` 会把本地任务
+# 镜像全部删掉（pier 撤 tag 后它们都没有容器引用），下一轮 run 必须逐个重新 pull，
+# 这是启动与开跑变慢的主因；反复增长的只有构建缓存。
+# 阈值只约束构建缓存，镜像占用不计入；设 0 表示关闭自动回收。
+# 可用 LLM_SERVER_EVAL_DOCKER_DISK_LIMIT_GB 覆盖。
 # 与 buildkit 自回收的分工：/etc/docker/daemon.json 里配了
 # `builder.gc.defaultKeepStorage = 200GB`，缓存由 buildkit 自己压在 200G 以内；
 # 本阈值对齐到同一个数，常态下应用层不动手（避免把 buildkit 辛苦复用的缓存全清），
-# 只有总占用真超 200G（或 buildkit GC 没生效）才兜底强清。
+# 只有缓存真超 200G（或 buildkit GC 没生效）才兜底强清。
 DEFAULT_DOCKER_DISK_LIMIT_GB = 200
 
-# 回收时必须保住的镜像：pier 生成的 Dockerfile 固定用 `COPY --from=<uv-base>` 预置 uv，
-# 该镜像被 prune 掉会让所有任务构建直接失败（`COPY --from` 拉不到，见 develop.md §H.1）。
-# docker 的 prune 没有「排除指定镜像」的过滤器，因此策略是：先清干净，再就地重建。
+# 系统盘可用空间低于该值（GB）才清「悬空镜像」（无 tag、无引用）：这类镜像本来就
+# 无法被引用，删除不影响有 tag 镜像的复用。有 tag 的镜像永不自动删除。
+DEFAULT_DOCKER_MIN_FREE_GB = 10
+
+# pier 生成的 Dockerfile 固定用 `COPY --from=<uv-base>` 预置 uv，该镜像缺失会让所有
+# 任务构建直接失败（`COPY --from` 拉不到，见 develop.md §6.1）。自动回收只清构建缓存、
+# 不删有 tag 的镜像，因此它不会被回收掉；仅在清理悬空镜像或人工删除后兜底重建。
 UV_BASE_IMAGE = "llm-server-eval/uv-base:0.7.13"
 UV_BASE_UV_VERSION = "0.7.13"         # 镜像内预置的 uv 版本（PyPI wheel 取同名版本）
 

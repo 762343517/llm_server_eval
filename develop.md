@@ -101,7 +101,7 @@ printf 'FROM debian:bookworm-slim\nCOPY uv /uv\nRUN chmod 0755 /uv\n' > /tmp/uvb
 docker build -t llm-server-eval/uv-base:0.7.13 /tmp/uvbase
 ```
 
-服务侧的自动回收会调用 `ensure_uv_base()` 补回该镜像，等价于以上步骤（wheel 解包用 `zipfile`，无需系统 unzip）。
+自动回收只清构建缓存、不删有 tag 的镜像，`uv-base` 不会被自动清掉；清理悬空镜像或人工删除后，`ensure_uv_base()` 按以上步骤补回（wheel 解包用 `zipfile`，无需系统 unzip）。
 
 ### 6.2 pier 补丁维护
 
