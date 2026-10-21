@@ -16,8 +16,13 @@ zhipuEval
 │   ├── consts.py          # 端点/API Key 等连接默认值
 │   ├── appconfig.py       # 表单默认值与「上次配置」持久化
 │   ├── run_manager.py     # 精度测试任务管理（状态/进度/导出）
-│   ├── dataset_registry.py # 数据集清单（dataset/datasets.json）读取与字段映射
-│   ├── eval_core.py       # 数据集加载、生成、裁判、汇总
+│   ├── dataset_registry.py # 数据集清单（dataset/datasets.json）解析：reader/字段/任务目录
+│   ├── adapters/          # 数据集适配器层：业务代码读取数据集的唯一入口
+│   │   ├── base.py        # 适配器接口、注册表、统一加载入口与表格归一化
+│   │   ├── table.py       # csv / parquet
+│   │   ├── hle.py         # HLE（按 row group 读内嵌图片）
+│   │   └── tasks.py       # Agent 任务集（task.toml / instruction.md 约定）
+│   ├── eval_core.py       # 精度测试：生成、裁判、汇总（数据集读取已下沉到 adapters）
 │   ├── simpleqa_eval.py   # 精度测试命令行入口
 │   ├── perf_core.py       # EvalScope 集成：数据集生成、命令行构造、结果解析、指标聚合
 │   ├── perf_manager.py    # 压测任务管理（子进程/实时进度/导出）
@@ -135,6 +140,22 @@ python3 backend/simpleqa_eval.py --data dataset/HLE/test-00000-of-00001.parquet 
 | `csv` | 表格类数据集 | 多分片 CSV 按文件名顺序拼接 |
 | `parquet` | 通用 parquet | 多分片交由 pandas 拼接（图片列原样透传） |
 | `hle` | HLE 专用 | 按 row group 只读采样命中行的 `image` 列，整表含 base64 图片时快很多 |
+
+### 适配器层
+
+读取实现集中在 `backend/adapters/`，上层（`eval_core` / `agent_core` / `api`）只调用
+`adapters.load()` / `adapters.catalog()` / `adapters.tasks.*`，不感知具体格式：
+
+| 模块 | 负责 | 说明 |
+| --- | --- | --- |
+| `adapters/table.py` | `csv` / `parquet` | 通用表格：字段映射、采样、图片抽取共用 |
+| `adapters/hle.py` | `hle` | 按 row group 只读采样行的图片列 |
+| `adapters/tasks.py` | Agent 任务集 | 任务目录 / `task.toml` / `instruction.md` 约定与抽样 |
+
+新增一种「数据格式」（不是新增数据集）时：在 `adapters/` 下实现 `DatasetAdapter.load()`，
+用 `@register` 登记 reader 名，配置里写该 reader 即可，业务代码零改动；新增同格式数据集
+仍然只是拷目录 + 改 `datasets.json`。压测侧的数据集（`custom_multi_turn` / `random` /
+`line_by_line`）是运行时合成的载荷，不读 `dataset/` 清单，仍由 `perf_core.py` 自行构造。
 
 当前已登记的数据集：
 

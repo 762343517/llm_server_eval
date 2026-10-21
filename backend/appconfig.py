@@ -8,7 +8,7 @@ import json
 import os
 
 import consts
-import dataset_registry
+import adapters
 import eval_core
 import perf_core
 import run_manager
@@ -72,7 +72,7 @@ def accuracy_defaults():
         "model": consts.DEFAULT_MODEL,
         "judge_model": consts.DEFAULT_JUDGE_MODEL,
         # 数据集来自固定的 dataset/ 目录，默认取 dataset/datasets.json 配置里的 default
-        "data": dataset_registry.default_path() or eval_core.DEFAULT_DATA,
+        "data": adapters.default_path() or eval_core.DEFAULT_DATA,
         "thinking": consts.DEFAULT_THINKING,
         "reasoning_effort": consts.DEFAULT_REASONING_EFFORT,
         "judge_thinking": consts.DEFAULT_THINKING,
@@ -100,12 +100,12 @@ def _valid_dataset(path):
     if path and os.path.exists(path):
         # 历史配置里可能存的是相对路径，统一规范化为绝对路径以便与下拉框候选匹配
         return os.path.abspath(path)
-    return dataset_registry.default_path() or eval_core.DEFAULT_DATA
+    return adapters.default_path() or eval_core.DEFAULT_DATA
 
 
 def _default_agent_data():
     """Agent 任务集目录：取配置里第一个声明了 agent 段的数据集。"""
-    for item in dataset_registry.datasets():
+    for item in adapters.catalog():
         tasks_dir = (item.get("agent") or {}).get("tasks_dir")
         if tasks_dir:
             return tasks_dir

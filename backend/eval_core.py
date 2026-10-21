@@ -3,9 +3,9 @@
 CLI (simpleqa_eval.py) 与 Web 服务 (api.py) 共用同一套实现，
 所有可变配置（端点/密钥/模型/并发/上限）均通过参数注入，不使用模块级全局常量。
 
-数据集不再硬编码在代码里：清单与字段映射见 dataset/datasets.json（dataset_registry），
-每个数据集以名称作为顶级目录放在 dataset/ 下。加载时按配置里的 reader/fields 把源表
-映射为统一字段，题型判定与打分模板完全复用。
+数据集不再硬编码在代码里：清单与字段映射见 dataset/datasets.json，具体的读取实现
+由 adapters 按条目里的 reader 选择（csv / parquet / hle ...）。本模块只拿到统一字段
+的表，题型判定与打分模板完全复用，新增数据格式不需要改这里。
 """
 import json
 import logging
@@ -19,7 +19,7 @@ from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 import pandas as pd
 import requests
 
-import dataset_registry
+import adapters
 import utils
 
 ANSWER_PROMPT = """Your response should be in the following format:
@@ -60,198 +60,37 @@ GRADE_LABELS = {
 }
 
 # 默认数据集：来自 dataset/datasets.json 的 default（配置缺失时为空，由调用方兜底）
-DEFAULT_DATA = dataset_registry.default_path()
-
-# 数据集统一后的字段（_NORM_COLUMNS）：由配置里的 fields 映射而来，
-# 未声明映射的字段按同名列读取，列不存在时填空值。
-_NORM_COLUMNS = ("original_index", "problem", "answer", "topic", "answer_type",
-                 "subject")
+DEFAULT_DATA = adapters.default_path()
 
 
 def available_datasets():
     """数据集候选（含文件是否存在、是否可用当前流程评测），供 Web 端下拉选择。
 
-    清单、文件名通配符与字段映射均来自 dataset/datasets.json（见 dataset_registry），
-    新增数据集不需要改代码。
+    清单、文件名通配符与字段映射均来自 dataset/datasets.json；读取实现由 adapters
+    按 reader 选择，本模块不感知具体格式。
     """
-    return dataset_registry.datasets()
+    return adapters.catalog()
 
 
 def default_data_path():
     """当前默认数据集路径（实时读取配置，供表单默认值与兜底使用）。"""
-    return dataset_registry.default_path() or DEFAULT_DATA
-
-
-def dataset_reader(path, spec=None):
-    """返回 (读取方式, 字段映射)：优先用配置，自定义路径按扩展名兜底。"""
-    if spec is None:
-        spec = dataset_registry.spec_for_path(path)
-    if spec:
-        return (spec.get("reader") or "csv"), (spec.get("fields") or {})
-    return ("parquet" if (path or "").lower().endswith((".parquet", ".pq"))
-            else "csv"), {}
+    return adapters.default_path() or DEFAULT_DATA
 
 
 def dataset_label(path, spec=None):
     """数据集展示名：配置里的名称，自定义路径取所在目录名。"""
-    if spec is None:
-        spec = dataset_registry.spec_for_path(path)
-    if spec and spec.get("name"):
-        return spec["name"]
-    return os.path.dirname(path or "").rstrip("/").split("/")[-1] or (path or "")
-
-
-def _str_col(df, name, default=""):
-    if name in df.columns:
-        return df[name].fillna(default).astype(str)
-    return pd.Series([default] * len(df), index=df.index)
-
-
-def _mapped(fields, name, default):
-    """统一字段对应的源列名：配置里声明过则用映射，否则按同名/默认列名。"""
-    return (fields or {}).get(name) or default
-
-
-def _row_group_bounds(pf):
-    """返回每个 row group 的行号区间 [(start, end), ...]。"""
-    bounds, start = [], 0
-    for g in range(pf.num_row_groups):
-        n = pf.metadata.row_group(g).num_rows
-        bounds.append((start, start + n))
-        start += n
-    return bounds
-
-
-def _read_hle_images(pf, indexes, on_event=None, col="image"):
-    """仅读取包含目标行的 row group 的 image 列。
-
-    HLE 的 image 为内嵌 base64（整表解压后超过 1GB），全量读取既慢且占用大量内存；
-    按命中的 row group 精确读取后，限制题量时加载耗时从分钟级降至秒级。
-    """
-    need = sorted({int(i) for i in indexes})
-    bounds = _row_group_bounds(pf)
-    images, done = {}, 0
-    for gi, (s, e) in enumerate(bounds):
-        sel = [i for i in need if s <= i < e]
-        if not sel:
-            continue
-        values = pf.read_row_group(gi, columns=[col]).column(col).to_pylist()
-        for i in sel:
-            v = values[i - s]
-            if isinstance(v, str) and v.strip():
-                images[i] = v
-        done += len(sel)
-        if on_event:
-            on_event("load_progress", {
-                "total": len(need), "loaded": done, "images": len(images),
-                "row_group": gi + 1, "row_groups": pf.num_row_groups,
-            })
-    return images
-
-
-def _load_hle(files, fields=None, limit=0, seed=0, on_event=None):
-    """HLE 专用加载（reader="hle"）：按 row group 只读采样命中行的 image 列。"""
-    import pyarrow.parquet as pq
-
-    pf = pq.ParquetFile(files[0])
-    names = pf.schema_arrow.names
-    cols = {name: _mapped(fields, name, default) for name, default in (
-        ("problem", "question"), ("answer", "answer"), ("topic", "category"),
-        ("answer_type", "answer_type"), ("subject", "raw_subject"))}
-    light = [c for c in dict.fromkeys(cols.values()) if c in names]
-
-    raw = pf.read(columns=light).to_pandas()
-    df = pd.DataFrame({
-        "original_index": pd.Series(range(len(raw)), index=raw.index),
-        "problem": _str_col(raw, cols["problem"]),
-        "answer": _str_col(raw, cols["answer"]),
-        "topic": _str_col(raw, cols["topic"], "Unknown"),
-        "answer_type": _str_col(raw, cols["answer_type"], "exactMatch"),
-        "subject": _str_col(raw, cols["subject"]),
-    })
-    del raw
-
-    picked = df
-    if limit and limit < len(df):
-        picked = df.sample(n=limit, random_state=seed).sort_index()
-
-    image_col = _mapped(fields, "image", "image")
-    images = {}
-    if image_col in names and len(picked):
-        images = _read_hle_images(pf, picked["original_index"].tolist(), on_event,
-                                  image_col)
-    return picked[list(_NORM_COLUMNS)].reset_index(drop=True), images
-
-
-def _normalise(raw, fields=None, limit=0, seed=0, on_event=None):
-    """把原始表映射为统一字段（含采样与图片抽取），各 reader 共用。"""
-    if "original_index" in raw.columns:
-        idx = raw["original_index"].astype(int)
-    else:
-        idx = pd.Series(range(len(raw)), index=raw.index)
-    df = pd.DataFrame({"original_index": idx})
-    for col in ("problem", "answer", "topic", "answer_type", "subject"):
-        df[col] = _str_col(raw, _mapped(fields, col, col),
-                           "Unknown" if col == "topic" else "")
-    image_col = _mapped(fields, "image", "image")
-    images = ({int(i): v for i, v in _str_col(raw, image_col).items() if v}
-              if image_col in raw.columns else {})
-    del raw
-
-    picked = df
-    if limit and limit < len(df):
-        picked = df.sample(n=limit, random_state=seed).sort_index()
-    keep = set(picked["original_index"].astype(int).tolist())
-    images = {k: v for k, v in images.items() if k in keep}
-    if on_event:
-        on_event("load_progress", {"total": len(picked), "loaded": len(picked),
-                                   "images": len(images)})
-    return picked[list(_NORM_COLUMNS)].reset_index(drop=True), images
-
-
-def _load_csv(files, fields=None, limit=0, seed=0, on_event=None):
-    """CSV 数据集（多分片按文件名顺序拼接）。"""
-    if len(files) == 1:
-        raw = pd.read_csv(files[0])
-    else:
-        raw = pd.concat([pd.read_csv(f) for f in files], ignore_index=True)
-    return _normalise(raw, fields, limit, seed, on_event)
-
-
-def _load_parquet(files, fields=None, limit=0, seed=0, on_event=None):
-    """通用 parquet 数据集（多分片交由 pandas 拼接）。"""
-    raw = pd.read_parquet(files if len(files) > 1 else files[0])
-    return _normalise(raw, fields, limit, seed, on_event)
+    return adapters.label(path, spec)
 
 
 def load_dataset(path, limit=0, seed=0, on_event=None, spec=None):
     """读取数据集并归一化为统一字段（含采样）。
 
-    path 为数据文件路径（页面上也可以填任意 csv/parquet 路径）；spec 为
-    dataset_registry 里的数据集条目，缺省时按路径反查配置、再按扩展名兜底，
-    读取方式与字段映射都来自配置，因此新增数据集不需要改代码。
-
-    返回 (df, images)：df 含 _NORM_COLUMNS；images 为 {original_index: data-url}，
-    仅当数据集含图片（HLE 多模态题）时非空，避免将 base64 复制进逐题记录。
-    limit>0 时在此处完成采样，图片仅加载采样命中的行。
+    具体格式由 adapters 按清单里的 reader 选择适配器（csv/parquet/hle/...），
+    本函数只做转发，新增数据格式不需要改这里。返回 (df, images)：
+    df 含 NORM_COLUMNS；images 为 {original_index: data-url}，仅多模态数据集非空，
+    limit>0 时在适配器内完成采样，图片只加载采样命中的行。
     """
-    on_event = on_event or (lambda kind, payload: None)
-    if spec is None:
-        spec = dataset_registry.spec_for_path(path)
-    reader, fields = dataset_reader(path, spec)
-    files = [f for f in (spec or {}).get("files") or [] if os.path.isfile(f)]
-    if not files:
-        files = [path]
-    on_event("load_start", {"path": path, "kind": reader,
-                            "dataset": dataset_label(path, spec)})
-    if reader == "hle":
-        df, images = _load_hle(files, fields, limit, seed, on_event)
-    elif reader == "parquet":
-        df, images = _load_parquet(files, fields, limit, seed, on_event)
-    else:
-        df, images = _load_csv(files, fields, limit, seed, on_event)
-    on_event("load_end", {"rows": len(df), "images": len(images)})
-    return df, images
+    return adapters.load(path, limit=limit, seed=seed, on_event=on_event, spec=spec)
 
 
 class HttpError(RuntimeError):

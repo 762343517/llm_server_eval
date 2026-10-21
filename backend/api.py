@@ -29,7 +29,7 @@ import agent_core     # noqa: E402
 import appconfig      # noqa: E402
 import consts         # noqa: E402
 import csvview        # noqa: E402
-import dataset_registry   # noqa: E402
+import adapters           # noqa: E402
 import eval_core      # noqa: E402
 import perf_core      # noqa: E402
 import perf_manager   # noqa: E402
@@ -118,7 +118,7 @@ def queue_state():
 @app.get("/api/meta")
 def api_meta():
     # 数据集清单来自 dataset/datasets.json（每个数据集以名称作为顶级目录放在 dataset/ 下）
-    datasets = dataset_registry.datasets()
+    datasets = adapters.catalog()
     defaults = appconfig.accuracy_defaults()
     # 上次使用的路径不在配置的数据集列表里时，回填到「自定义数据集路径」
     known = {d["path"] for d in datasets}
@@ -198,7 +198,7 @@ def _accuracy_cfg(payload):
     if not os.path.exists(data):
         raise HTTPException(400, "数据集不存在: {}".format(data))
     # 配置里标记 runnable=false 的数据集（如 SWE 类 agent 任务）不能走单轮作答 + 裁判判分
-    spec = dataset_registry.find(data)
+    spec = adapters.find(data)
     if spec and not spec["runnable"]:
         raise HTTPException(400, "数据集 {} 无法用当前流程评测：{}".format(
             spec["title"] or spec["name"],

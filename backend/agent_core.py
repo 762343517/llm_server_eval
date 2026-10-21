@@ -7,15 +7,15 @@
   3. 判定由任务自带的测试驱动：应用测试补丁 → 跑测试脚本 → reward = 是否通过；
   4. 因此这里不解析数据集表，而是驱动沙箱框架并解析其任务产物。
 
-任务目录来自 dataset/datasets.json 的 agent 段（见 dataset_registry）；本模块做三件事：
-环境自检与适配（docker / pier / egress 代理端口）、组装 pier 命令、执行并解析结果。
+任务集清单与格式约定（任务目录 / task.toml / instruction.md）来自 adapters.tasks；
+本模块只做三件事：环境自检与适配（docker / pier / egress 代理端口）、组装 pier 命令、
+执行并解析结果。
 """
 import calendar
 import collections
 import glob
 import json
 import os
-import random
 import re
 import shlex
 import shutil
@@ -25,17 +25,9 @@ import tempfile
 import threading
 import time
 
+import adapters
 import consts
-import dataset_registry
 import utils
-
-try:                                    # Python >= 3.11 自带 tomllib，3.10 用 tomli
-    import tomllib as _toml
-except ImportError:                     # pragma: no cover
-    try:
-        import tomli as _toml
-    except ImportError:
-        _toml = None
 
 FRAMEWORK = "pier"
 PIER_COMMAND = "pier"
@@ -414,98 +406,44 @@ def ensure_egress_patch():
 
 
 # ------------------------------------------------------------------ 数据集与任务清单
+# 任务集的格式约定（task.toml / instruction.md / 目录布局）统一在 adapters/tasks.py，
+# 这里只保留与 pier 运行相关的包装（把本机镜像清单注入适配器）。
 def agent_datasets():
     """配置里声明了 agent 段的数据集（即 Agent 任务集）。"""
-    return [it for it in dataset_registry.datasets() if it.get("agent")]
+    return adapters.tasks.catalog()
 
 
 def task_spec(name_or_path=""):
-    """按名称/路径找 Agent 任务集条目；缺省取第一个（当前即 DeepSWE）。"""
-    items = agent_datasets()
-    key = str(name_or_path or "").strip()
-    if key:
-        for it in items:
-            if key in (it["name"], it["dir"], it["path"]):
-                return it
-    return items[0] if items else None
+    """按名称/路径找 Agent 任务集条目；缺省取第一个。"""
+    return adapters.tasks.spec(name_or_path)
 
 
 def tasks_dir(spec=None):
     """任务集目录（dataset/<数据集名称>/tasks）。"""
-    item = spec if spec is not None else task_spec()
-    return ((item or {}).get("agent") or {}).get("tasks_dir", "")
-
-
-def _read_toml(path):
-    """解析 task.toml（缺 tomllib/tomli 或文件损坏时返回空 dict）。"""
-    if _toml is None:
-        return {}
-    try:
-        with open(path, "rb") as fh:
-            data = _toml.load(fh)
-    except (OSError, ValueError):
-        return {}
-    return data if isinstance(data, dict) else {}
-
-
-# 数值兜底统一收敛到 utils（原先 api / agent_core / perf_core 各写一份）
-_num = utils.float_or
+    return adapters.tasks.directory(spec)
 
 
 def list_tasks(directory):
-    """枚举任务目录：每个任务含 task.toml（名称取目录名，元信息取自 toml）。"""
-    items = []
-    if not directory or not os.path.isdir(directory):
-        return items
-    ready = known_images()
-    for name in sorted(os.listdir(directory)):
-        path = os.path.join(directory, name)
-        task_file = os.path.join(path, "task.toml")
-        if not os.path.isfile(task_file):
-            continue
-        meta = _read_toml(task_file)
-        info = meta.get("metadata") or {}
-        env = meta.get("environment") or {}
-        image = str(env.get("docker_image") or "").strip()
-        items.append({
-            "name": name,
-            "dir": path,
-            "title": str(info.get("display_title") or "").strip() or name,
-            "category": str(info.get("category") or "").strip(),
-            "language": str(info.get("language") or "").strip(),
-            "agent_timeout_sec": _num((meta.get("agent") or {}).get("timeout_sec")),
-            "verifier_timeout_sec": _num((meta.get("verifier") or {}).get("timeout_sec")),
-            "docker_image": image,
-            # 镜像是否已在本机（未拉取时首次运行要等下载）
-            "image_ready": image in ready if image else False,
-        })
-    return items
+    """枚举任务目录（含 task.toml 元信息与本机镜像是否就绪）。"""
+    return adapters.tasks.list_tasks(directory, images=known_images())
 
 
 def task_names(directory):
-    return [it["name"] for it in list_tasks(directory)]
+    return adapters.tasks.names(directory, images=known_images())
 
 
 def tasks_label(directory):
     """任务集标签：dataset/deepswe/tasks -> deepswe（用于日志与汇总标题）。"""
-    path = os.path.abspath(str(directory or "."))
-    base = os.path.basename(path)
-    return os.path.basename(os.path.dirname(path)) if base == "tasks" else base
+    return adapters.tasks.label(directory)
 
 
 def resolve_tasks_dir(path):
-    """把页面/配置里的路径解析成「任务目录集合」所在目录。
+    """把页面/配置里的路径解析成「任务目录集合」所在目录。"""
+    return adapters.tasks.resolve_dir(path)
 
-    支持三种写法：数据集名称（如 deepswe）、数据集目录、tasks 目录本身
-    （后者用于临时指向别处的任务集，只要子目录里有 task.toml 即可）。
-    """
-    key = str(path or "").strip()
-    spec = dataset_registry.find(key)
-    if spec and spec.get("agent"):
-        return spec["agent"]["tasks_dir"]
-    if key and os.path.isdir(key) and os.path.isdir(os.path.join(key, "tasks")):
-        return os.path.join(key, "tasks")
-    return key
+
+# 数值兜底统一收敛到 utils（原先 api / agent_core / perf_core 各写一份）
+_num = utils.float_or
 
 
 # ------------------------------------------------------------------ 环境自检
@@ -535,7 +473,7 @@ def _static_env(use_cache=True):
         "pier": {"available": bool(binary), "path": binary,
                  "version": pier_version() if binary else ""},
         "egress": egress_state(),
-        "toml": _toml is not None,
+        "toml": adapters.tasks.toml_available(),
     }
     _ENV_CACHE.update({"at": now, "data": data})
     return data
@@ -564,7 +502,7 @@ def _env_report(use_cache=True):
         notes.append("egress 代理默认只放行 80/443，发起时自动放宽到非特权端口")
     else:
         notes.append("egress 代理端口适配状态未知：{}".format(egress["detail"]))
-    if _toml is None:
+    if not adapters.tasks.toml_available():
         notes.append("缺少 TOML 解析库（Python < 3.11 需 pip install tomli）")
     return {
         "docker": docker,
@@ -615,13 +553,8 @@ def endpoint_base(endpoint):
 
 
 def sample_tasks(catalogue, limit=0, seed=0):
-    """按 limit/seed 挑任务：limit<=0 取全部；seed=0 按目录顺序取前 N 个（可复现）。"""
-    if limit and limit < len(catalogue):
-        if seed:
-            return sorted(random.Random(seed).sample(catalogue, limit),
-                          key=lambda t: t["name"])
-        return catalogue[:limit]
-    return list(catalogue)
+    """按 limit/seed 挑任务（抽样策略见 adapters.tasks.sample）。"""
+    return adapters.tasks.sample(catalogue, limit, seed)
 
 
 _SELECTION_CACHE = {}
@@ -737,16 +670,8 @@ def _epoch(text):
 
 
 def _instruction(task_dir, limit=600):
-    """任务说明摘要（instruction.md），用于结果表展示与检索。"""
-    for name in ("instruction.md", "README.md"):
-        path = os.path.join(str(task_dir or ""), name)
-        if os.path.isfile(path):
-            try:
-                with open(path, encoding="utf-8", errors="replace") as fh:
-                    return " ".join(fh.read().split())[:limit]
-            except OSError:
-                return ""
-    return ""
+    """任务说明摘要（格式约定见 adapters.tasks.instruction）。"""
+    return adapters.tasks.instruction(task_dir, limit)
 
 
 def trial_task(trial, meta_by_name=None):
