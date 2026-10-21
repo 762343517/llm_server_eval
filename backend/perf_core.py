@@ -81,6 +81,14 @@ GENERATED_TEMPLATE_FILE = "chat_template.jinja"    # 缺对话模板时自动补
 # 逐行提交的缓冲行数：越小实时性越好，越大写入开销越小。
 # 取 1 是为了让运行中的进度/明细能立即读到（evalscope 的写入在独立线程，开销可控）。
 DB_COMMIT_INTERVAL = 1
+# 结果库读取：单次最多读多少行、拿锁最多等多久。
+# 一条 128K 请求的行含整段 prompt（实测约 1MB），而 evalscope 用默认 rollback
+# journal 建库、默认 5s 的 busy_timeout：平台侧若用 COUNT(*) / OFFSET 做游标，
+# 每次轮询都要扫全表、长时间持有 SHARED 锁，evalscope 的 `con.commit()` 等不到
+# EXCLUSIVE 锁就抛 "sqlite3.OperationalError: database is locked" 并中断整轮压测。
+# 因此按 rowid 做 keyset 分页、只读需要的列、单次限量，把每个读事务压到毫秒级。
+READ_BATCH = 512
+READ_TIMEOUT = 0.5
 # unique_prefix 打开时，每条请求注入的随机前缀长度（字符）
 UNIQUE_PREFIX_CHARS = 1024
 # 单条 prompt 的长度上限（字符，evalscope 默认值）
@@ -961,6 +969,9 @@ def _record(row, level, cfg, run_id, anchor, index):
     tps = None
     if completion_tokens is not None and latency > 0:
         tps = completion_tokens / latency
+    turn = _request_turn(cell("request"))
+    if turn is None and prompt_mode(cfg) == MODE_LONG and cell("success") is not None:
+        turn = 1        # long 模式不读 request 列（整段 prompt），该模式恒为单轮
     return {
         "run_id": run_id,
         "timestamp_start": ts.isoformat(timespec="milliseconds") if ts else "",
@@ -968,7 +979,7 @@ def _record(row, level, cfg, run_id, anchor, index):
                          if ts else "",
         "concurrent_users_level": level,
         "conversation": "conv",
-        "turn": _request_turn(cell("request")),
+        "turn": turn,
         "iteration": index,
         "user_id": cell("request_id") or "",
         "success": success,
@@ -994,36 +1005,73 @@ def _target_of(cfg):
         return (cfg.get("endpoint") or "").strip()
 
 
+# 平台侧真正用到的列。`request` 是整段 prompt（长序列模式下每行数百 KB 到 1MB），
+# 只用来数轮次；`inter_token_latencies` / `response_messages` 完全不用，均不读。
+READ_COLUMNS = (
+    "start_time", "success", "latency", "first_chunk_latency",
+    "prompt_tokens", "completion_tokens", "time_per_output_token", "request_id",
+)
+
+
+def _read_columns(cfg):
+    columns = list(READ_COLUMNS)
+    if prompt_mode(cfg) != MODE_LONG:
+        columns.append("request")       # 会话模式的 request 只有几百字节，用于推断轮次
+    return ", ".join(columns)
+
+
+def _select_batch(path, columns, last_rowid, limit):
+    """按 rowid keyset 读一批新增行；库还没建好/正被写时返回 None。
+
+    不长事务、不扫全表：只从 `last_rowid` 之后取 `limit` 行，
+    避免把 evalscope 的写入（commit）堵到超时报 "database is locked"。
+    """
+    try:
+        conn = sqlite3.connect("file:{}?mode=ro".format(path), uri=True,
+                               timeout=READ_TIMEOUT)
+    except sqlite3.Error:
+        return None
+    try:
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA busy_timeout={}".format(int(READ_TIMEOUT * 1000)))
+        return conn.execute(
+            "SELECT rowid AS _rid, {} FROM result WHERE rowid > ? "
+            "ORDER BY rowid LIMIT ?".format(columns),
+            (int(last_rowid), int(limit))).fetchall()
+    except sqlite3.Error:                   # 表尚未创建 / 结果库损坏
+        return None
+    finally:
+        conn.close()
+
+
 def read_records(run_dir, cfg=None, run_id="", after=None):
     """增量读取 evalscope 的 SQLite 结果库，归一化为统一记录格式。
 
-    结果库**只追加**，因此按「已读行数」做游标即可安全增量读取（运行中也能读）。
-    `after` 为 {db_path: 已读行数}，返回 (新增记录, 新游标)。
+    结果库**只追加**，因此按 rowid 游标（keyset 分页）增量读取：只读新增行、
+    只读需要的列，单次最多 READ_BATCH 行。`after` 为 {db_path: 已读到的 rowid}，
+    返回 (新增记录, 新游标)；`after=None` 表示整库读取（同样分批，不让单个读事务
+    持续太久）。
     """
     cfg = cfg or {}
     cursor = dict(after or {})
+    incremental = after is not None
     records = []
     anchor = _time_anchor()
+    columns = _read_columns(cfg)
     for level, path in _result_dbs(run_dir):
-        done = int(cursor.get(path) or 0)
-        try:
-            conn = sqlite3.connect("file:{}?mode=ro".format(path), uri=True, timeout=3.0)
-        except sqlite3.Error:
-            continue
-        try:
-            conn.row_factory = sqlite3.Row
-            total = conn.execute("SELECT COUNT(*) FROM result").fetchone()[0]
-            if total <= done:
-                continue
-            rows = conn.execute("SELECT * FROM result LIMIT ? OFFSET ?",
-                                (total - done, done)).fetchall()
-        except sqlite3.Error:               # 表尚未创建 / 正被写入进程持有
-            continue
-        finally:
-            conn.close()
-        cursor[path] = total
-        for i, row in enumerate(rows, start=done + 1):
-            records.append(_record(row, level, cfg, run_id, anchor, i))
+        last = int(cursor.get(path) or 0)
+        while True:
+            rows = _select_batch(path, columns, last, READ_BATCH)
+            if not rows:
+                break
+            last = int(rows[-1]["_rid"])
+            cursor[path] = last
+            for row in rows:
+                records.append(_record(row, level, cfg, run_id, anchor,
+                                       int(row["_rid"])))
+            # 运行中的增量读取一次只读一批，剩下的交给下一轮轮询
+            if incremental or len(rows) < READ_BATCH:
+                break
     return records, cursor
 
 

@@ -335,6 +335,10 @@ long 模式为**单轮**请求：`--number` 即请求数，进度与预计请求
 - `args.json` 完整命令行与参数（含密钥，权限 600，页面展示时脱敏）；
 - `perf/<档位目录>/benchmark_data.db` evalscope 的 SQLite 结果库，以
   `--db-commit-interval 1` 逐行提交，后端据此边跑边读，实时刷新进度、曲线与明细；
+  读取按 rowid keyset 增量分页、只取需要的列（长序列模式不读整段 `request`，单行近 1MB），
+  单次最多 512 行、拿锁最多等 0.5 秒：evalscope 那边是默认 rollback journal + 5 秒
+  `busy_timeout`，读事务一旦拖长就会让它的 `commit()` 抛
+  `sqlite3.OperationalError: database is locked` 并中断整轮压测；
 - `meta.json` 任务快照（状态、实时指标、汇总、日志），key 已脱敏；
 - `proc.json` 运行期间记录 evalscope 进程组号与所属服务进程号（权限 600），收尾删除；
 - `results.csv` 点击「下载 CSV / 结果表格」时按需导出（UTF-8 BOM）；
