@@ -312,10 +312,17 @@ long 模式为**单轮**请求：`--number` 即请求数，进度与预计请求
 | `results.csv` | 点击「下载 CSV / 结果表格」时按需导出（UTF-8 BOM） |
 | `perf/<档位目录>/benchmark_data.db` | evalscope 的 SQLite 结果库，以 `--db-commit-interval 1` 逐行提交，后端据此边跑边读，实时刷新进度、曲线与明细 |
 | `perf/benchmark.log` / `performance_summary.txt` / `perf_report.html` | evalscope 原生报告，详情页「原始产物」卡片可在线查看（文本或 iframe 内嵌）或下载 |
+| `perf/evalscope_stderr.log` | 子进程 **stderr** 原样落盘（Python Traceback、崩溃栈、evalscope 的 logging 输出都在这里）；跳过 tqdm 进度行，超过 4MB 截断。运行时同时以 `[stderr]` 前缀写任务日志 |
+| `perf/failed_requests.log` | 失败请求逐条明细：并发档位、rowid、**HTTP 状态码**与响应体摘要（见下） |
 
 结果库读取按 rowid keyset 增量分页、只取需要的列（长序列模式不读整段 `request`，单行近 1MB），单次最多 512 行、拿锁最多等 0.5 秒：evalscope 侧是默认 rollback journal + 5 秒 `busy_timeout`，读事务拖长会让它的 `commit()` 抛 `sqlite3.OperationalError: database is locked` 并中断整轮压测。
 
-原始产物接口为 `GET /api/stress/runs/{run_id}/files`（清单）与 `.../file?path=<相对路径>[&download=1]`（正文），仅放行上述三个文件名的白名单路径。
+原始产物接口为 `GET /api/stress/runs/{run_id}/files`（清单）与 `.../file?path=<相对路径>[&download=1]`（正文），仅放行 `RESULT_FILES` 白名单里的文件名。
+
+**逐请求错误日志与失败诊断**：evalscope 只把 `status_code` / `error` 留在内存里（`result` 表没有这两列，`benchmark.log` 也只记 INFO），因此失败原因分两步落盘：
+
+1. 运行中每读到一条失败请求就写一行日志（`[失败] 第 N 条请求失败（并发 X，耗时 …，起始 …）`），前 20 条逐条输出，之后只累计，避免失败风暴刷屏；
+2. 压测结束且存在失败请求时，后端从结果库取前几条失败请求的**原始请求体**重放一次，取回真实 HTTP 状态码与响应体摘要（如 `HTTP 400：{"error":{"message":"maximum context length is 1048576 tokens…"}}`），写入 `perf/failed_requests.log`，并把结论回填到 `meta.json` 的 `error` 与逐请求明细，页面任务列表/详情直接可见。重放不计入指标，最多 `PERF_PROBE_LIMIT` 次（默认 3，`0` 关闭），相同请求体只重放一次，超时取 `min(total_timeout, 60s)`。
 
 提交任务后、启动 evalscope 前，后端对目标端点做一次 TCP 连通性预检（3 秒超时，只握手不发请求、不消耗 token）：连接被拒 / 超时 / 域名解析失败直接以 400 返回原因，无需等待 evalscope 的 `connect_test` 耗尽 `--total-timeout`。
 

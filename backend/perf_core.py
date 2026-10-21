@@ -37,6 +37,8 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.error
+import urllib.request
 from datetime import datetime, timedelta
 from urllib.parse import urlsplit
 
@@ -57,6 +59,16 @@ RESULT_FILES = (
     ("benchmark.log", "evalscope 运行日志", "text"),
     ("performance_summary.txt", "性能汇总报告", "text"),
     ("perf_report.html", "可视化报告", "html"),
+)
+
+# 平台自己补的两份排障产物（evalscope 自身不产出）：
+#   evalscope_stderr.log —— 子进程 stderr 原样落盘（Traceback / 崩溃栈都在这里）；
+#   failed_requests.log  —— 失败请求逐条明细，含重放取回的 HTTP 状态码与响应体摘要。
+STDERR_FILE = "evalscope_stderr.log"
+FAILED_FILE = "failed_requests.log"
+RESULT_FILES = RESULT_FILES + (
+    (STDERR_FILE, "evalscope stderr（异常栈）", "text"),
+    (FAILED_FILE, "失败请求明细（含 HTTP 状态码）", "text"),
 )
 
 # 请求模式：chat = 自定义会话提问；long = 长序列 + 固定前缀（Prefix Cache 命中率）
@@ -101,6 +113,13 @@ READ_BUDGET = 0.25
 UNIQUE_PREFIX_CHARS = 1024
 # 单条 prompt 的长度上限（字符，evalscope 默认值）
 MAX_PROMPT_LENGTH = 131072
+
+# 失败诊断：evalscope 的 `status_code` / `error` 只存在内存里（result 表没有这两列，
+# benchmark.log 也只记 INFO），失败原因只能靠「重放同一份请求体」取回 HTTP 状态码。
+# 重放放在整轮压测结束之后、只做几次，且不进入指标统计；PERF_PROBE_LIMIT=0 可关闭。
+PROBE_LIMIT = 3
+PROBE_TIMEOUT = 60.0
+PROBE_BODY_CHARS = 500                        # 响应体摘要保留的字符数
 # 长序列 + 固定前缀内容模式下，未填写提问内容时使用的默认问题
 DEFAULT_LONG_QUESTION = "请用一句话介绍你自己。"
 # 启动前目标连通性预检的超时（秒）：只做一次 TCP 握手，不发 HTTP、不消耗 token。
@@ -999,7 +1018,9 @@ def _record(row, level, cfg, run_id, anchor, index):
         "tokens_per_second": tps,
         "kv_cache_usage": None,
         "cache_hit_rate": None,
-        "error": "" if success else "请求失败（详见 benchmark.log）",
+        # 逐请求的失败原因要等收尾阶段重放才知道（evalscope 不落盘状态码），
+        # 这里先给出兜底文案，诊断完成后由 perf_manager 覆盖前几条
+        "error": "" if success else "请求失败（详见 perf/{}）".format(FAILED_FILE),
         "scenario": (cfg.get("name") or "stress"),
         "target_server": _target_of(cfg),
         "target_model": (cfg.get("model") or "").strip(),
@@ -1084,6 +1105,154 @@ def read_records(run_dir, cfg=None, run_id="", after=None):
             if incremental and time.monotonic() - started >= READ_BUDGET:
                 break
     return records, cursor
+
+
+# ------------------------------------------------------------------- 失败诊断
+def stderr_path(run_dir):
+    """evalscope 子进程 stderr 的落盘路径（<run_dir>/perf/evalscope_stderr.log）。"""
+    return os.path.join(os.path.abspath(str(run_dir)), RUN_NAME, STDERR_FILE)
+
+
+def probe_limit():
+    """失败重放次数上限（环境变量 PERF_PROBE_LIMIT 可覆盖，0 表示关闭重放）。"""
+    try:
+        return max(0, int(os.environ.get("PERF_PROBE_LIMIT", PROBE_LIMIT)))
+    except ValueError:
+        return PROBE_LIMIT
+
+
+def probe_timeout(cfg):
+    """重放用的超时：不短于压测本身的 total_timeout，最长 PROBE_TIMEOUT。
+
+    重放只用于取证，跑满整个压测超时没有意义；但目标服务在长序列下可能先排队
+    再报错，超时设得太短会拿到「无响应」而不是真实的 4xx。
+    """
+    try:
+        base = float((cfg or {}).get("timeout") or 0) or PROBE_TIMEOUT
+    except (TypeError, ValueError):
+        base = PROBE_TIMEOUT
+    return max(5.0, min(base, PROBE_TIMEOUT))
+
+
+def _snippet(raw, limit=PROBE_BODY_CHARS):
+    """把响应体压成一行摘要：去换行、截断，避免日志被整段 HTML 误差页刷屏。"""
+    if isinstance(raw, bytes):
+        raw = raw.decode("utf-8", "replace")
+    text = " ".join(str(raw or "").split())
+    return text[:limit]
+
+
+def failure_message(status_code, detail=""):
+    """失败请求的一句话结论：优先 HTTP 状态码，其次原始异常描述。"""
+    detail = (detail or "").strip()
+    if not status_code:
+        return "请求失败（未收到 HTTP 响应{}）".format("：" + detail if detail else "")
+    if status_code < 400:
+        # 重放反而成功：说明失败是偶发错误或客户端超时，不是配置/契约问题
+        return "重放已成功（HTTP {}）：原失败可能是偶发错误或客户端超时".format(status_code)
+    return "HTTP {}{}".format(status_code, "：" + detail if detail else "")
+
+
+def failed_bodies(run_dir, limit):
+    """取前 `limit` 条失败请求的原始请求体，供重放取证。
+
+    `request` 是整段 prompt（长序列模式下每行数百 KB 到 1MB），只在**失败之后**
+    读、且最多读几行；成功请求的该列一律不碰。
+    """
+    if limit <= 0:
+        return []
+    out = []
+    seen = set()
+    for level, path in _result_dbs(run_dir):
+        try:
+            conn = sqlite3.connect("file:{}?mode=ro".format(path), uri=True,
+                                   timeout=READ_TIMEOUT)
+        except sqlite3.Error:
+            continue
+        try:
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA busy_timeout={}".format(int(READ_TIMEOUT * 1000)))
+            rows = conn.execute(
+                "SELECT rowid AS _rid, request FROM result WHERE success = 0 "
+                "ORDER BY rowid LIMIT ?", (int(limit) * 4,)).fetchall()
+        except sqlite3.Error:
+            rows = []
+        finally:
+            conn.close()
+        for row in rows:
+            body = row["request"]
+            if not body:
+                continue
+            key = hash(body)
+            if key in seen:             # 同一份请求体只重放一次
+                continue
+            seen.add(key)
+            out.append({"level": level, "rowid": int(row["_rid"]), "body": body})
+            if len(out) >= limit:
+                return out
+    return out
+
+
+def probe_request(cfg, body, timeout):
+    """同步重放一次请求，返回 (status_code, 响应体摘要)。
+
+    用标准库而不是 aiohttp/requests：只在收尾阶段调用一次，不需要连接池，
+    也免得多引一个第三方依赖。4xx/5xx 由 HTTPError 给出状态码与响应体。
+    """
+    url = normalize_endpoint((cfg or {}).get("endpoint"))
+    headers = {"Content-Type": "application/json", "Accept": "application/json"}
+    api_key = ((cfg or {}).get("api_key") or "").strip()
+    if api_key:
+        headers["Authorization"] = "Bearer " + api_key
+    data = body.encode("utf-8") if isinstance(body, str) else body
+    req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return int(resp.status), _snippet(resp.read(4096))
+    except urllib.error.HTTPError as exc:
+        return int(exc.code), _snippet(exc.read())
+    except Exception as exc:            # noqa: BLE001  连接/超时/证书等
+        return None, "{}: {}".format(type(exc).__name__, exc)
+
+
+def diagnose_failures(run_dir, cfg, limit=None, log=None):
+    """重放少量失败请求，取回 HTTP 状态码并写 <run_dir>/perf/failed_requests.log。
+
+    返回 [{"rowid", "level", "status_code", "message"}]；重放次数受 probe_limit()
+    限制，且只在压测结束后执行，不会混进被测服务的指标。
+    """
+    limit = probe_limit() if limit is None else int(limit)
+    samples = failed_bodies(run_dir, limit)
+    if not samples:
+        return []
+    timeout = probe_timeout(cfg)
+    lines = [
+        "# 失败请求诊断 · {}".format(datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+        "# evalscope 不落盘 HTTP 状态码（result 表无该列、benchmark.log 只记 INFO），",
+        "# 因此这里按原请求体重放 {} 次取回状态码；重放不计入压测指标。".format(len(samples)),
+        "# 重放用的是本任务启动时记录的密钥：若已轮换，这里会得到 401，不代表当时的失败原因。",
+        "",
+    ]
+    out = []
+    for i, sample in enumerate(samples, 1):
+        status, text = probe_request(cfg, sample["body"], timeout)
+        message = failure_message(status, text)
+        out.append({"rowid": sample["rowid"], "level": sample["level"],
+                    "status_code": status, "message": message})
+        lines.append("[{}] 并发={} rowid={} 状态码={} 响应={}".format(
+            i, sample["level"], sample["rowid"],
+            status if status is not None else "-", text or "-"))
+        if log:
+            log("[失败] 重放第 {}/{} 条：{}".format(i, len(samples), message[:300]))
+    try:
+        os.makedirs(os.path.join(str(run_dir), RUN_NAME), exist_ok=True)
+        with open(os.path.join(str(run_dir), RUN_NAME, FAILED_FILE), "a",
+                  encoding="utf-8") as f:
+            f.write("\n".join(lines) + "\n\n")
+    except OSError as exc:
+        if log:
+            log("[失败] 写 {} 失败：{}".format(FAILED_FILE, exc))
+    return out
 
 
 # --------------------------------------------------------------------- 指标聚合

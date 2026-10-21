@@ -140,6 +140,10 @@ const applyPreset = (totalTokens, ratio) => {
 
 const isLongCfg = (cfg) => Boolean(cfg && cfg.prompt_mode === 'long')
 
+// 名称/说明：与 Agent 任务列表同口径，早期快照缺这两个字段时分别回落到任务号与占位符
+const runName = (run) => String((run.cfg && (run.cfg.name || '')) || '').trim() || run.run_id
+const runDesc = (run) => String((run.cfg && (run.cfg.description || '')) || '').trim() || '—'
+
 // 快照里的请求数：新配置是 --number 列表（与并发档位同序）；早期快照只有 iterations
 // （每个并发的请求数），按并发数换算回 --number 显示。
 const cfgNumbers = (cfg) => {
@@ -577,6 +581,8 @@ onUnmounted(() => timer && clearInterval(timer))
       <table>
         <thead>
           <tr>
+            <th style="min-width: 150px">任务名称</th>
+            <th style="min-width: 240px">说明</th>
             <th>任务</th>
             <th>状态</th>
             <th>模型 / 端点</th>
@@ -591,6 +597,12 @@ onUnmounted(() => timer && clearInterval(timer))
         </thead>
         <tbody>
           <tr v-for="run in runs" :key="run.run_id">
+            <td>
+              <RouterLink :to="`/stress/${run.run_id}`" class="clip" :title="runName(run)">
+                {{ runName(run) }}
+              </RouterLink>
+            </td>
+            <td><span class="clip" :title="runDesc(run)">{{ runDesc(run) }}</span></td>
             <td>
               <RouterLink :to="`/stress/${run.run_id}`" class="mono">{{ run.run_id }}</RouterLink>
               <div class="muted">{{ run.started_at_str }}</div>

@@ -13,6 +13,7 @@
 """
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -29,6 +30,10 @@ LAST_CFG = ".last_stress_config.json"
 ARGS_NAME = "args.json"
 MAX_LOGS = 200
 MAX_RECORDS = 200000            # 内存中保留的明细上限，防止超长压测占满内存
+FAILED_LOG_LINES = 20           # 逐请求失败日志最多逐条输出多少条（之后只累计）
+STDERR_MAX_BYTES = 4 * 1024 * 1024      # evalscope_stderr.log 的落盘上限
+# tqdm 进度行（形如 `Generating:  45%|████▌| 5/11 [00:32<00:39, 6.57s/it]`）不落盘
+_PROGRESS_RE = re.compile(r"\d+%\|.*\|.*(?:it/s|s/it)")
 STATUS_TEXT = {"queued": "排队中", "running": "压测中", "succeeded": "已完成",
                "failed": "失败", "stopped": "已停止", "interrupted": "已中断"}
 MASK = "***"
@@ -255,6 +260,7 @@ class StressRun:
         self.args_text = None
         self.expected = perf_core.expected_requests(cfg)
         self._cursor = {}                # {db_path: 已读取行数}，增量读取用
+        self._failed_logged = 0          # 已逐条输出的失败请求数（防止失败风暴刷屏）
         self._last_agg = 0.0
         self._last_read = 0.0
         self._last_save = 0.0
@@ -371,10 +377,32 @@ class StressRun:
             return
         with self.lock:
             room = MAX_RECORDS - len(self.records)
+            base = len(self.records)
             if room > 0:
                 self.records.extend(parsed[:room])
+        for offset, rec in enumerate(parsed[:max(room, 0)]):
+            if not rec.get("success"):
+                self._log_failure(base + offset + 1, rec)
         if self._recompute():
             self._maybe_save()
+
+    def _log_failure(self, index, rec):
+        """逐请求输出失败日志：前 FAILED_LOG_LINES 条逐条记，之后只保留汇总。
+
+        失败原因（HTTP 状态码）evalscope 不落盘，要等收尾重放才知道；这里先把
+        发生位置、并发、耗时记下来，便于对照时间线定位。
+        """
+        if self._failed_logged >= FAILED_LOG_LINES:
+            return
+        self._failed_logged += 1
+        latency = float(rec.get("e2e_latency_s") or 0.0)
+        started = str(rec.get("timestamp_start") or "").replace("T", " ")[:19] or "-"
+        self.log("[失败] 第 {} 条请求失败（并发 {}，耗时 {}，起始 {}）".format(
+            index, int(rec.get("concurrent_users_level") or 0),
+            "{:.2f}s".format(latency) if latency > 0 else "-", started))
+        if self._failed_logged == FAILED_LOG_LINES:
+            self.log("[失败] 后续失败请求不再逐条输出，明细见 perf/{}".format(
+                perf_core.FAILED_FILE))
 
     def _pump_stdout(self, proc):
         """将 evalscope 的输出写入任务日志。"""
@@ -385,6 +413,50 @@ class StressRun:
                     self.log("[evalscope] " + line[:400])
         except Exception:  # noqa: BLE001
             pass
+
+    def _pump_stderr(self, proc):
+        """把 evalscope 的 stderr 落盘为 perf/evalscope_stderr.log，同时进任务日志。
+
+        与 stdout 分开收集的缘故：evalscope 的 logging 走 StreamHandler（默认就是
+        stderr），tqdm 进度条也写 stderr，而 Python 的 Traceback 同样只出现在
+        stderr。混在 stdout 里会被进度条刷掉，所以单独落一份文件。
+
+        落盘时跳过 tqdm 进度行（含 `|...| ... it/s`），并按 STDERR_MAX_BYTES 截断：
+        长压测的进度行能到几十万行，把它们写进文件没有排障价值。
+        """
+        path = perf_core.stderr_path(self.dir)
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            f = open(path, "a", encoding="utf-8")
+        except OSError as exc:
+            self.log("[stderr] 无法写入 {}：{}".format(perf_core.STDERR_FILE, exc))
+            f = None
+        size = 0
+        truncated = False
+        try:
+            for line in proc.stderr:
+                text = line.rstrip("\n")
+                if text.strip():
+                    self.log("[stderr] " + text.strip()[:400])
+                progress = _PROGRESS_RE.search(text) is not None
+                if f is not None and not progress:
+                    if size + len(text) + 1 > STDERR_MAX_BYTES:
+                        if not truncated:
+                            truncated = True
+                            f.write("# 已达 {} MB 上限，后续 stderr 不再落盘（完整内容见 "
+                                    "perf/benchmark.log）\n".format(STDERR_MAX_BYTES >> 20))
+                            f.flush()
+                    else:
+                        try:
+                            size += f.write(text + "\n")
+                            f.flush()
+                        except (OSError, ValueError):
+                            f = None
+        except Exception:  # noqa: BLE001
+            pass
+        finally:
+            if f is not None:
+                f.close()
 
     def _terminate(self, proc=None):
         """终止 evalscope 进程组，返回是否已确认全部退出。
@@ -422,14 +494,16 @@ class StressRun:
             cmd = perf_core.build_command(self.cfg, self.dir, self.dataset_path)
             self.log("[启动] " + " ".join(_redact(cmd)))
             proc = subprocess.Popen(cmd, cwd=self.dir, stdout=subprocess.PIPE,
-                                    stderr=subprocess.STDOUT, text=True, bufsize=1,
+                                    stderr=subprocess.PIPE, text=True, bufsize=1,
                                     start_new_session=True)
             self.proc = proc
             self.pgid = proc.pid         # start_new_session=True：组号即子进程号
             save_proc(self.dir, {"pid": proc.pid, "pgid": proc.pid,
                                  "server_pid": os.getpid(),
                                  "started_at": time.time()})
+            # stderr 必须同样有人读走，否则管道写满后 evalscope 会阻塞在写日志上
             threading.Thread(target=self._pump_stdout, args=(proc,), daemon=True).start()
+            threading.Thread(target=self._pump_stderr, args=(proc,), daemon=True).start()
             self.phase = "run"
             self.progress = {"stage": "压测中",
                              "text": "0/{} 请求".format(self.expected), "pct": 0.0}
@@ -452,12 +526,53 @@ class StressRun:
         finally:
             self._finalize(rc, error)
 
+    def _diagnose(self):
+        """失败诊断：重放少量失败请求取回 HTTP 状态码，写 perf/failed_requests.log。
+
+        evalscope 只在内存里保留 `output.status_code` / `output.error`，result 表
+        没有这两列、benchmark.log 也只记 INFO，因此「全部 10 个请求失败」这种结论
+        必须靠重放同一份请求体取证。重放放在压测结束之后，最多 probe_limit() 次。
+        """
+        failed = [r for r in self.records if not r.get("success")]
+        if not failed or self.stop_event.is_set() or self.deleted:
+            return
+        limit = min(perf_core.probe_limit(), len(failed))
+        if limit <= 0:
+            return
+        self.log("[失败] 正在重放 {} 条失败请求以取回 HTTP 状态码（不计入指标）"
+                 .format(limit))
+        try:
+            results = perf_core.diagnose_failures(
+                self.dir, self.cfg, limit=limit, log=self.log)
+        except Exception as exc:  # noqa: BLE001  诊断失败不能影响任务收尾
+            self.log("[失败] 诊断请求重放出错：{}: {}".format(type(exc).__name__, exc))
+            return
+        if not results:
+            self.log("[失败] 无可重放的请求体，HTTP 状态码暂不可知")
+            return
+        with self.lock:
+            # 重放顺序与失败顺序一致：把真实原因回填到对应的逐请求记录上
+            for index, rec in enumerate(failed[:len(results)]):
+                rec["error"] = results[index]["message"]
+            rest = len(failed) - len(results)
+            errors = [{"message": r["message"], "count": 1} for r in results]
+            if rest > 0 and errors:
+                errors[0]["count"] += rest
+            self.summary["errors"] = errors
+            self.stats["errors"] = list(errors)
+            self.log("[失败] 已重放 {} 条失败请求，明细见 perf/{}".format(
+                len(results), perf_core.FAILED_FILE))
+
     def _finalize(self, rc, error):
         """确定最终状态并生成汇总；即使失败也保留已完成的部分结果。"""
         with self.lock:
             self.summary = perf_core.aggregate(self.records)
             self.conv = perf_core.conversation_metrics(self.records)
             self.by_level = perf_core.by_level(self.records)
+        # 失败诊断要发真实请求（最多 probe_limit 次），不能占用锁也别拖慢成功任务
+        if self.summary.get("error_count"):
+            self._diagnose()
+        with self.lock:
             if error:
                 self.status, self.error = "failed", error
             elif self.stop_event.is_set():
