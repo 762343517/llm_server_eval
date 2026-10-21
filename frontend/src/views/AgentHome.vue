@@ -537,7 +537,12 @@ onUnmounted(() => timer && clearInterval(timer))
               <div class="muted">{{ run.stage }}</div>
               <ProgressBar :pct="run.pct" :status="run.status" :text="`${(run.pct || 0).toFixed(0)}%`" />
             </td>
-            <td class="num">{{ run.pass_at_1 === null || run.pass_at_1 === undefined ? '—' : pct(run.pass_at_1) }}</td>
+            <td class="num">
+              {{ run.pass_at_1 === null || run.pass_at_1 === undefined ? '—' : pct(run.pass_at_1) }}
+              <div v-if="run.summary && run.summary.num_excluded" class="muted">
+                剔除环境/超时 {{ int(run.summary.num_excluded) }}
+              </div>
+            </td>
             <td class="num">{{ int(run.n_done) }} / {{ int(run.expected) }}</td>
             <td class="num">{{ duration(run.duration_s) }}</td>
             <td>

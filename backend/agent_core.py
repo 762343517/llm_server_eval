@@ -694,6 +694,10 @@ FAILURE_KIND_TEXT = {
     "unresolved": "判分未通过",
     "unknown": "未分类异常",
 }
+# 环境没起来（镜像/容器/网络/依赖）与超时反映的是评测环境与预算，不是模型能力：
+# 与「判定与计分口径」里无效判定的处理一致，这两类失败不计入通过率的分母，
+# 但仍逐条记录，并在失败原因分布里如实展示（不丢弃、不改判分结果）。
+EXCLUDED_FAILURE_KINDS = ("timeout", "environment")
 _TIMEOUT_HINTS = ("timeout", "timed out", "超时")
 # agent 起不来（命令缺失、路径错、无权限）虽然可能包成 NonZeroAgentExitCodeError，
 # 本质是 harness/环境问题，优先级高于指令异常。
@@ -757,6 +761,43 @@ def failure_kind_counts(records):
                                  if r.get("failure_kind"))
     return [{"kind": kind, "text": text, "count": counts.get(kind, 0)}
             for kind, text in FAILURE_KIND_TEXT.items()]
+
+
+def is_excluded(row):
+    """该任务是否因环境/超时失败而不计入通过率分母。"""
+    return row.get("failure_kind") in EXCLUDED_FAILURE_KINDS
+
+
+def scoring(records):
+    """按「剔除环境/超时」的口径统计通过率，返回分数字段。
+
+    分母是「计分任务数」（num_scored）= 有结果的任务 - 环境/超时失败任务；
+    没有任何计分任务时 pass_at_1 记 0（避免除零），num_excluded 仍如实给出。
+    """
+    resolved = sum(1 for r in records if r.get("status") == "resolved")
+    excluded = sum(1 for r in records if is_excluded(r))
+    scored = len(records) - excluded
+    return {
+        "resolved": resolved,
+        "num_scored": scored,
+        "num_excluded": excluded,
+        "pass_at_1": round(resolved / scored, 4) if scored else 0.0,
+    }
+
+
+def apply_scoring(summary, records):
+    """按当前口径补齐汇总里的通过率字段（只改内存对象，不落盘）。
+
+    旧 run 的 pass_at_1 把环境/超时失败也算进分母，读取时用逐任务记录重算；
+    分组通过率同一口径，一并重算。
+    """
+    if not summary or not records:
+        return summary
+    rows = [fill_failure_kind(r) for r in records]
+    summary.update(scoring(rows))
+    summary["by_category"] = _group(rows, "category")
+    summary["by_language"] = _group(rows, "language")
+    return summary
 
 
 def trial_record(trial_dir, data, meta=None):
@@ -1003,9 +1044,14 @@ def list_subtasks(cfg, out):
 
 
 def _group(records, key):
-    """按字段分组统计（通过率），供汇总展示。"""
+    """按字段分组统计（通过率），供汇总展示。
+
+    与整体通过率同一口径：环境/超时失败不计入分组分母。
+    """
     out = {}
     for row in records:
+        if is_excluded(row):
+            continue
         name = row.get(key) or "未分类"
         item = out.setdefault(name, {"total": 0, "resolved": 0})
         item["total"] += 1
@@ -1627,6 +1673,8 @@ def run_agent_eval(cfg, on_event=None, should_stop=None):
     resolved_n = sum(1 for r in items if r["status"] == "resolved")
     error_n = sum(1 for r in items if r["status"] == "error")
     unfinished = len(items) - resolved_n - error_n
+    # 通过率只按「计分任务」算：环境/超时失败的题目不进分母（见 EXCLUDED_FAILURE_KINDS）
+    score = scoring(items)
     in_tok = sum(r["input_tokens"] for r in items)
     out_tok = sum(r["output_tokens"] for r in items)
     cache_tok = sum(r["cache_tokens"] for r in items)
@@ -1648,7 +1696,9 @@ def run_agent_eval(cfg, on_event=None, should_stop=None):
         "resolved": resolved_n,
         "unresolved": unfinished,
         "errors": error_n,
-        "pass_at_1": round(resolved_n / len(items), 4),
+        "num_scored": score["num_scored"],
+        "num_excluded": score["num_excluded"],
+        "pass_at_1": score["pass_at_1"],
         "steps": steps,
         "avg_steps": round(steps / len(items), 1),
         "input_tokens": in_tok,
@@ -1671,6 +1721,7 @@ def run_agent_eval(cfg, on_event=None, should_stop=None):
     with open(out + ".json", "w", encoding="utf-8") as fh:
         json.dump(summary, fh, ensure_ascii=False, indent=2)
     on_event("agent_end", {"done": done, "errors": error_n, "resolved": resolved_n,
+                           "excluded": score["num_excluded"],
                            "elapsed_s": round(elapsed, 1), "stopped": stopped})
     on_event("summary", {"summary": summary, "records": len(items)})
     return summary

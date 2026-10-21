@@ -30,6 +30,17 @@ const queueAhead = computed(() => Math.max(0, ((snap.value && snap.value.queue_p
 const agent = computed(() => (snap.value && snap.value.agent) || {})
 const summary = computed(() => (snap.value && snap.value.summary) || {})
 const cfg = computed(() => (snap.value && snap.value.cfg) || {})
+// 通过率分母 = 计分任务数（环境/超时失败不计入），旧 run 没有该字段时退回总记录数
+const scoredCount = computed(() => {
+  const s = summary.value
+  return s.num_scored === undefined || s.num_scored === null ? s.num_records : s.num_scored
+})
+const excludedCount = computed(() =>
+  (summary.value.num_excluded === undefined || summary.value.num_excluded === null
+    ? 0 : Number(summary.value.num_excluded)))
+const passSub = computed(() => (excludedCount.value
+  ? `计分 ${int(scoredCount.value)}，剔除环境/超时 ${int(excludedCount.value)}`
+  : ''))
 
 const cfgRows = computed(() => {
   const c = cfg.value
@@ -109,6 +120,13 @@ const detailRows = (row) => {
     { k: '类别', v: text(row.category) },
     { k: '状态', v: row.state_text },
     { k: '结果', v: text(row.result_text) },
+    {
+      k: '计入通过率',
+      v: row.state === 'waiting' || row.state === 'running'
+        ? '—'
+        : (row.failure_kind === 'timeout' || row.failure_kind === 'environment'
+          ? '否（环境/超时不计入）' : '是'),
+    },
     {
       k: '失败原因',
       v: row.state === 'error'
@@ -290,16 +308,22 @@ onUnmounted(() => {
       <StatTile
         label="通过率 (pass@1)"
         :value="summary.pass_at_1 === undefined || summary.pass_at_1 === null ? '—' : pct(summary.pass_at_1)"
+        :sub="passSub"
         :tone="summary.pass_at_1 >= 0.5 ? 'good' : ''"
       />
       <StatTile
         label="通过任务"
         :value="int(summary.resolved)"
-        :sub="`/ ${int(summary.num_records)}`"
+        :sub="`/ ${int(scoredCount)}`"
         :tone="summary.resolved ? 'good' : ''"
       />
       <StatTile label="未通过" :value="int(summary.unresolved)" />
-      <StatTile label="异常" :value="int(summary.errors)" :tone="summary.errors ? 'bad' : ''" />
+      <StatTile
+        label="异常"
+        :value="int(summary.errors)"
+        :sub="excludedCount ? `环境/超时 ${int(excludedCount)} 不计入` : ''"
+        :tone="summary.errors ? 'bad' : ''"
+      />
       <StatTile label="计划任务" :value="int(agent.total)" :sub="`已完成 ${int(agent.done)}`" />
       <StatTile label="平均步数" :value="num(summary.avg_steps, 1)" sub="步/任务" />
       <StatTile label="tokens(入/出)" :value="`${compact(summary.input_tokens)} / ${compact(summary.output_tokens)}`" />
@@ -437,7 +461,8 @@ onUnmounted(() => {
       />
     </div>
     <p class="hint mt">
-      上排按任务类别统计；下排为失败原因分布（超时 / 指令 / 环境 / 判分未通过），
+      上排按任务类别统计；下排为失败原因分布（超时 / 指令 / 环境 / 判分未通过）。
+      环境异常与超时失败反映评测环境与预算，不计入通过率分母，但仍逐条记录；
       详细字段与结果 JSON 一致
     </p>
     <KvList :items="Object.entries(summary).map(([k, v]) => ({ k, v: typeof v === 'object' ? JSON.stringify(v) : String(v) }))" />

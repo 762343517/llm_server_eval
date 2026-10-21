@@ -642,6 +642,9 @@ def _decorate_agent(runs):
         r["status_text"] = ACC_STATUS_TEXT.get(r.get("status"), r.get("status"))
         r["queue_position"] = task_queue.QUEUE.position(r.get("run_id"))
         s = r.get("summary") or {}
+        if s and "num_scored" not in s and r.get("run_id"):
+            # 旧 run 的 pass_at_1 按旧口径落盘（环境/超时也计入分母），读取时按现口径重算
+            agent_core.apply_scoring(s, agent.read_items(r["run_id"]))
         r["pass_at_1"] = s.get("pass_at_1")
         r["n_done"] = s.get("num_records")
         r["expected"] = s.get("num_tasks")
@@ -781,10 +784,13 @@ def agent_status(run_id: str):
     snap["stage"] = prog.get("stage", "")
     snap["pct"] = prog.get("pct", 0.0)
     summary = snap.get("summary") or {}
-    if summary and not summary.get("by_failure_kind"):
-        # 旧 run 的汇总没有失败原因分布，读取时按同一规则补一份（不落盘）
-        summary["by_failure_kind"] = agent_core.failure_kind_counts(
-            [agent_core.fill_failure_kind(row) for row in agent.read_items(run_id)])
+    if summary and ("num_scored" not in summary or not summary.get("by_failure_kind")):
+        # 旧 run 的汇总没有失败原因分布 / 剔除统计，读取时按同一规则补齐（不落盘）
+        rows = [agent_core.fill_failure_kind(row) for row in agent.read_items(run_id)]
+        if not summary.get("by_failure_kind"):
+            summary["by_failure_kind"] = agent_core.failure_kind_counts(rows)
+        if "num_scored" not in summary:
+            agent_core.apply_scoring(summary, rows)
     return JSONResponse(snap)
 
 

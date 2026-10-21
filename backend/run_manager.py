@@ -120,8 +120,9 @@ class RunState:
                       "cached": 0}
         # 终端 Agent 评测进度（kind=terminal 时使用；其余任务类型保持全 0）
         self.agent = {"done": 0, "total": 0, "errors": 0, "resolved": 0,
-                      "steps": 0, "tokens": 0, "elapsed_s": 0.0, "tps": 0.0,
-                      "cached": 0, "todo": 0, "max_steps": 0, "max_tokens": 0}
+                      "excluded": 0, "steps": 0, "tokens": 0, "elapsed_s": 0.0,
+                      "tps": 0.0, "cached": 0, "todo": 0, "max_steps": 0,
+                      "max_tokens": 0}
         self.summary = None
         self.logs = collections.deque(maxlen=400)
         self.stop_event = threading.Event()
@@ -232,10 +233,14 @@ class RunState:
             elif kind == "agent_end":
                 self.agent.update({"done": p["done"], "errors": p["errors"],
                                    "resolved": p["resolved"],
+                                   "excluded": p.get("excluded", 0),
                                    "elapsed_s": p["elapsed_s"]})
-                self.log("[agent] 完成 {} 个任务，通过 {}，异常 {}，耗时 {:.1f} 分钟{}"
+                excluded = p.get("excluded") or 0
+                self.log("[agent] 完成 {} 个任务，通过 {}，异常 {}，耗时 {:.1f} 分钟{}{}"
                          .format(p["done"], p["resolved"], p["errors"],
                                  p["elapsed_s"] / 60,
+                                 "，其中环境/超时 {} 个不计入通过率".format(excluded)
+                                 if excluded else "",
                                  "（已停止）" if p.get("stopped") else ""))
             elif kind == "item_failed":
                 self.log("[{}-失败] 第 {} 题：{}".format(
