@@ -93,6 +93,11 @@ DEFAULT_AGENT_POLL_SECONDS = 3.0      # 轮询 pier 结果文件的间隔
 # 原列表里的 docker.xuanyuan.me 实测要求付费开通，已移除。
 DEFAULT_IMAGE_MIRRORS = ("docker.1ms.run", "docker.m.daocloud.io", "docker.1panel.live", "hub.rat.dev")
 DEFAULT_IMAGE_PULL_TIMEOUT = 600      # 单个镜像拉取上限（秒）：镜像可达数 GB
+# 并行拉取的镜像数。串行拉取时 65 个任务镜像实测要 21 分钟（每个约 20s，完全在等网络），
+# 这段时间 pier 还没启动、页面上什么都看不到。8 个并发把这段压到 3 分钟左右，
+# 又不会把 registry 带宽和磁盘写入挤爆（再高只会在 dockerd 里排队）。
+# 可用 LLM_SERVER_EVAL_IMAGE_PULL_CONCURRENCY 覆盖，1 表示退回串行（便于逐个定位镜像问题）。
+DEFAULT_IMAGE_PULL_CONCURRENCY = 8
 
 # ------------------------------------------------------ Docker 磁盘回收（Agent 评测）
 # 为什么需要：单任务镜像数 GB，且 buildkit 缓存因「每个任务 FROM 都不同」永远不命中

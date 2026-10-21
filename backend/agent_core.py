@@ -13,6 +13,7 @@
 """
 import calendar
 import collections
+import concurrent.futures
 import glob
 import json
 import os
@@ -235,6 +236,21 @@ def image_mirrors():
     return [p.strip().strip("/") for p in raw.split(",") if p.strip()]
 
 
+def image_pull_concurrency():
+    """并行拉取镜像的个数：环境变量可覆盖，1 表示串行（逐个定位镜像问题时用）。
+
+    上限 16：瓶颈在 registry 带宽与磁盘写入，再高只是在 dockerd 里排队。
+    """
+    raw = os.environ.get("LLM_SERVER_EVAL_IMAGE_PULL_CONCURRENCY")
+    try:
+        value = int(str(raw).strip()) if raw is not None and str(raw).strip() else None
+    except ValueError:
+        value = None
+    if value is None:
+        return max(1, consts.DEFAULT_IMAGE_PULL_CONCURRENCY)
+    return max(1, min(16, value))
+
+
 def is_docker_hub(image):
     """镜像是否归 Docker Hub —— 只有 Docker Hub 镜像才能套加速器前缀。
 
@@ -273,6 +289,41 @@ def _pull_candidates(image):
     return candidates
 
 
+def _pull_one_image(image, docker, emit, should_stop):
+    """拉取单个镜像（Docker Hub 镜像带加速器回退），返回 (状态, 是否被停止中断)。
+
+    状态：ready = 已在本地（必要时已 tag 回原名）；failed = 所有候选都拉不到；
+    "" = 被停止请求打断，既不算成功也不算失败。
+    """
+    hub = is_docker_hub(image)
+    for ref in _pull_candidates(image):
+        if should_stop():
+            return "", True
+        if ref != image:
+            emit("task_log", {"msg": "[镜像] 经 {} 拉取 {} …".format(
+                ref.split("/", 1)[0], image)})
+        rc, out = _run_interruptible(wrap_argv(["docker", "pull", ref], docker["mode"]),
+                                     consts.DEFAULT_IMAGE_PULL_TIMEOUT, should_stop)
+        if rc != 0:
+            if should_stop():                   # 是被停止打断的，不当作拉取失败
+                return "", True
+            if hub and ref == image:
+                _HUB_DIRECT["ok"] = False            # 记住直连不通，后续镜像不再重试
+            emit("task_log", {"msg": "[镜像] {} 拉取失败：{}".format(
+                ref, _last_line(out) or "未知原因")})
+            continue
+        if hub and ref == image:
+            _HUB_DIRECT["ok"] = True
+        if ref != image:
+            rc2, out2 = _run(wrap_argv(["docker", "tag", ref, image], docker["mode"]),
+                             timeout=60)
+            if rc2 != 0:
+                emit("task_log", {"msg": "[镜像] tag 失败：{}".format(_last_line(out2))})
+                continue
+        return "ready", False
+    return ("", True) if should_stop() else ("failed", False)
+
+
 def ensure_images_local(images, on_event=None, should_stop=None):
     """把本机缺失的任务镜像拉取并 tag 回原名，返回 (ready, failed)。
 
@@ -283,6 +334,10 @@ def ensure_images_local(images, on_event=None, should_stop=None):
 
     should_stop 为真时立即中止：已拉取的保留，未处理的既不记入 ready 也不记入 failed，
     调用方应据此区分「被用户停止」与「网络拉取失败」。
+
+    拉取是并发的（个数见 consts.DEFAULT_IMAGE_PULL_CONCURRENCY /
+    LLM_SERVER_EVAL_IMAGE_PULL_CONCURRENCY）：这一步纯等网络，串行时几十个镜像要
+    十几分钟，且这段时间 pier 还没启动。ready / failed 仍按传入顺序返回，日志文案不变。
     """
     emit = on_event or (lambda kind, payload=None: None)
     should_stop = should_stop or (lambda: False)
@@ -293,45 +348,53 @@ def ensure_images_local(images, on_event=None, should_stop=None):
     docker = docker_state()
     if not docker["ok"]:
         return [], missing
-    ready, failed = [], []
-    stopped = False
-    for image in missing:
-        if should_stop():
-            stopped = True
-            break
-        hub = is_docker_hub(image)
-        ok = False
-        for ref in _pull_candidates(image):
-            if ref != image:
-                emit("task_log", {"msg": "[镜像] 经 {} 拉取 {} …".format(
-                    ref.split("/", 1)[0], image)})
-            rc, out = _run_interruptible(wrap_argv(["docker", "pull", ref], docker["mode"]),
-                                         consts.DEFAULT_IMAGE_PULL_TIMEOUT, should_stop)
-            if rc != 0:
-                if should_stop():               # 是被停止打断的，不当作拉取失败
-                    stopped = True
-                    break
-                if hub and ref == image:
-                    _HUB_DIRECT["ok"] = False            # 记住直连不通，后续镜像不再重试
-                emit("task_log", {"msg": "[镜像] {} 拉取失败：{}".format(
-                    ref, _last_line(out) or "未知原因")})
-                continue
-            if hub and ref == image:
-                _HUB_DIRECT["ok"] = True
-            if ref != image:
-                rc2, out2 = _run(wrap_argv(["docker", "tag", ref, image], docker["mode"]),
-                                 timeout=60)
-                if rc2 != 0:
-                    emit("task_log", {"msg": "[镜像] tag 失败：{}".format(_last_line(out2))})
-                    continue
-            ok = True
-            emit("task_log", {"msg": "[镜像] 已就绪：{}".format(image)})
-            break
+
+    emit_lock = threading.Lock()
+
+    def safe_emit(kind, payload=None):
+        with emit_lock:                  # 多个拉取线程共用回调，避免日志行互相穿插
+            emit(kind, payload)
+
+    concurrency = max(1, min(image_pull_concurrency(), len(missing)))
+    statuses = [""] * len(missing)
+    state = {"stopped": False, "ready": 0}
+
+    def pull_at(index, image):
+        try:
+            status, stopped = _pull_one_image(image, docker, safe_emit, should_stop)
+        except Exception as exc:         # 单个镜像的意外错误不该拖垮整批，但要记成失败
+            safe_emit("task_log", {"msg": "[镜像] {} 拉取异常：{}".format(image, exc)})
+            status, stopped = "failed", False
+        statuses[index] = status
         if stopped:
-            break
-        (ready if ok else failed).append(image)
-    if stopped:
-        emit("task_log", {"msg": "[停止] 已中止镜像拉取：已就绪 {} 个，未处理 {} 个".format(
+            state["stopped"] = True
+        if status == "ready":
+            with emit_lock:
+                state["ready"] += 1
+                done = state["ready"]
+            safe_emit("task_log", {"msg": "[镜像] 已就绪（{}/{}）：{}".format(
+                done, len(missing), image)})
+        return status
+
+    safe_emit("task_log", {"msg": "[镜像] 开始拉取 {} 个缺失镜像（{} 并发）".format(
+        len(missing), concurrency)})
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=concurrency,
+                                                 thread_name_prefix="image-pull")
+    try:
+        futures = [pool.submit(pull_at, i, img) for i, img in enumerate(missing)]
+        for fut in concurrent.futures.as_completed(futures):
+            try:
+                fut.result()
+            except Exception as exc:     # 单个镜像的意外错误不该拖垮整批
+                safe_emit("task_log", {"msg": "[镜像] 拉取线程异常：{}".format(exc)})
+    finally:
+        # 停止时把还没开始的任务撤掉，不必等它们逐个自己发现 should_stop
+        pool.shutdown(wait=True, cancel_futures=state["stopped"])
+
+    ready = [img for img, st in zip(missing, statuses) if st == "ready"]
+    failed = [img for img, st in zip(missing, statuses) if st == "failed"]
+    if state["stopped"]:
+        safe_emit("task_log", {"msg": "[停止] 已中止镜像拉取：已就绪 {} 个，未处理 {} 个".format(
             len(ready), len(missing) - len(ready) - len(failed))})
     refresh_images()                                     # 让 known_images 下次重新枚举
     return ready, failed

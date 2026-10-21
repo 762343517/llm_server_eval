@@ -202,6 +202,8 @@ pier 正常结束会执行 `docker compose down --rmi all`；中断场景（点�
 
 回收不删镜像 tag（与 pier 的 `--rmi all` 不同），下一轮可直接复用，省一次 pull。
 
+起 pier 之前会把本机缺失的任务镜像先补齐（pier 撤过 tag 后必须重拉），这一步**并发执行**，并发数由 `consts.DEFAULT_IMAGE_PULL_CONCURRENCY`（默认 8）决定，可用 `LLM_SERVER_EVAL_IMAGE_PULL_CONCURRENCY` 覆盖，设 1 退回串行。串行时 65 个镜像实测要 21 分钟且期间 pier 尚未启动、页面上看不到任何进度；8 并发约 3 分钟。日志会写 `[镜像] 开始拉取 N 个缺失镜像（8 并发）` 与 `[镜像] 已就绪（3/65）：<image>`。
+
 磁盘回收只针对 buildkit 构建缓存（阈值 `LLM_SERVER_EVAL_DOCKER_DISK_LIMIT_GB`，默认 200GB，超阈才清且要求当前没有 pier 任务在跑）：镜像不参与，`docker image prune -a` 会让下一轮 run 全部重新拉取。只有在系统盘可用空间低于 `LLM_SERVER_EVAL_DOCKER_MIN_FREE_GB`（默认 10GB）时清理悬空镜像（无 tag、无引用），带 tag 的镜像一律保留。
 
 ### 6.3 任务集标识
