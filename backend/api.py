@@ -51,12 +51,24 @@ agent = run_manager.RunManager(
     csv_columns=run_manager.AGENT_CSV_COLUMNS)
 
 
+def _reclaim_log(kind, payload=None):
+    """启动兜底回收的日志：此时没有 run 上下文，只能打到 stderr（uvicorn 会一起输出）。"""
+    msg = (payload or {}).get("msg", "")
+    if msg:
+        print("[磁盘回收] " + msg, flush=True)
+
+
 @asynccontextmanager
 async def lifespan(_app):
     # 上次进程被强杀时，agent 评测来不及回收容器：后台兜底清理已结束 run 的残留，
     # 不阻塞启动（只处理终态 run，正在跑的 run 的容器不受影响）
     threading.Thread(target=agent_core.reclaim_orphans, args=(agent.runs_dir,),
                      name="reclaim-orphans", daemon=True).start()
+    # 镜像层与 buildkit 缓存靠 pier 的 `compose down --rmi all` 是清不掉的（只撤 tag），
+    # 启动兜底一次：占用超阈值才真动手，没任务在跑才敢删
+    threading.Thread(target=agent_core.reclaim_disk,
+                     kwargs={"on_event": _reclaim_log},
+                     name="reclaim-disk", daemon=True).start()
     try:
         yield
     finally:

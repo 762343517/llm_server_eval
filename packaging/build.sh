@@ -8,7 +8,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-NAME="zhipu-eval"
+NAME="llm-server-eval"
 VERSION="$(date +%Y%m%d)"
 WITH_DATA=1
 SKIP_WEB=0
@@ -45,7 +45,7 @@ fi
 echo "==> 2/4 PyInstaller 打包"
 cd "$ROOT"
 rm -f "$ROOT/dist/$NAME"
-python3 -m PyInstaller packaging/zhipu_eval.spec --noconfirm \
+python3 -m PyInstaller packaging/llm_server_eval.spec --noconfirm \
   --distpath "$ROOT/dist" --workpath "$ROOT/build/pyinstaller"
 
 echo "==> 3/4 组装发布目录 $STAGE"

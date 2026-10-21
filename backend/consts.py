@@ -88,11 +88,27 @@ DEFAULT_AGENT_POLL_SECONDS = 3.0      # 轮询 pier 结果文件的间隔
 # 任务镜像（如 alexgshaw/xxx:tag）直连 registry-1.docker.io 在内网会超时。这里按顺序尝试
 # 镜像加速器：先拉 `<加速器>/<原镜像>`，再 tag 回任务声明的原名（pier 只认原名）。
 # 只对 Docker Hub 镜像生效——加速器不代理 ECR/ghcr 等，套前缀会把本来能拉的镜像改坏。
-# 可用 ZHIPU_EVAL_IMAGE_MIRRORS 覆盖（逗号分隔），设为空串表示只用本机已有镜像。
+# 可用 LLM_SERVER_EVAL_IMAGE_MIRRORS 覆盖（逗号分隔），设为空串表示只用本机已有镜像。
 # 与 /etc/docker/daemon.json 的 registry-mirrors 保持一致；daemon 生效时直连原名即可。
 # 原列表里的 docker.xuanyuan.me 实测要求付费开通，已移除。
 DEFAULT_IMAGE_MIRRORS = ("docker.1ms.run", "docker.m.daocloud.io", "docker.1panel.live", "hub.rat.dev")
 DEFAULT_IMAGE_PULL_TIMEOUT = 600      # 单个镜像拉取上限（秒）：镜像可达数 GB
+
+# ------------------------------------------------------ Docker 磁盘回收（Agent 评测）
+# 为什么需要：单任务镜像数 GB，且 buildkit 缓存因「每个任务 FROM 都不同」永远不命中
+# （见 develop.md 2026-10-19 §B.2，89/113 个任务就是 89/113 次全量构建）；pier 跑完
+# 只做 `compose down --rmi all`（撤 tag，镜像层仍留在 /var/lib/containerd），
+# 而 agent_core 的容器回收又刻意保留镜像 tag 省 pull。三者叠加使 docker 占用只进不出：
+# 实测一次批量评测就把 437G 系统盘占满（镜像 223GB + 构建缓存 243GB）。
+# 策略：docker 占用（镜像 + 构建缓存）超过阈值才回收，回收后自动重建 uv-base。
+# 设 0 表示关闭自动回收。可用 LLM_SERVER_EVAL_DOCKER_DISK_LIMIT_GB 覆盖。
+DEFAULT_DOCKER_DISK_LIMIT_GB = 50
+
+# 回收时必须保住的镜像：pier 生成的 Dockerfile 固定用 `COPY --from=<uv-base>` 预置 uv，
+# 该镜像被 prune 掉会让所有任务构建直接失败（`COPY --from` 拉不到，见 develop.md §H.1）。
+# docker 的 prune 没有「排除指定镜像」的过滤器，因此策略是：先清干净，再就地重建。
+UV_BASE_IMAGE = "llm-server-eval/uv-base:0.7.13"
+UV_BASE_UV_VERSION = "0.7.13"         # 镜像内预置的 uv 版本（PyPI wheel 取同名版本）
 
 # 请求模式：chat = 自定义会话提问；long = 长序列 + 固定前缀（Prefix Cache 命中率）
 DEFAULT_STRESS_PROMPT_MODE = "chat"

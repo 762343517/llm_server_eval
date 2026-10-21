@@ -39,7 +39,7 @@ def float_or_none(value):
 
 # ------------------------------------------------------------------ 展示时区
 # 容器/服务器多以 UTC 运行，直接按系统时区渲染会比本地时间少 8 小时。
-# 通过 ZHIPU_EVAL_TZ 指定（默认东八区），设为 local/system 则沿用系统时区。
+# 通过 LLM_SERVER_EVAL_TZ 指定（默认东八区），设为 local/system 则沿用系统时区。
 LOCAL_TZ_NAMES = ("", "local", "system", "localtime")
 # 镜像缺 tzdata 时，这些名字退回固定 +08:00
 TZ_PLUS8_NAMES = ("asia/shanghai", "asia/chongqing", "asia/harbin", "asia/urumqi", "prc")
@@ -48,7 +48,7 @@ TIME_FMT = "%Y-%m-%d %H:%M:%S"
 
 def tz_name():
     """展示时区名（未配置时用东八区）。"""
-    return (os.environ.get("ZHIPU_EVAL_TZ") or "Asia/Shanghai").strip()
+    return (os.environ.get("LLM_SERVER_EVAL_TZ") or "Asia/Shanghai").strip()
 
 
 def display_tz(name=None):

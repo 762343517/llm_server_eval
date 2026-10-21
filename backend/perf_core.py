@@ -404,7 +404,7 @@ TEMPLATE_FAMILIES = (("deepseek", DEEPSEEK_CHAT_TEMPLATE),)
 FALLBACK_TEMPLATE_FAMILY = "chatml"
 GENERATED_TEMPLATE_MARK = "自动生成的对话模板"
 GENERATED_TEMPLATE_HEADER = """{#-
-""" + GENERATED_TEMPLATE_MARK + """（zhipuEval，族系：{family}）。
+""" + GENERATED_TEMPLATE_MARK + """（llm_server_eval，族系：{family}）。
 
 本目录原本没有对话模板（tokenizer_config.json 无 chat_template 字段，也没有
 chat_template.jinja），而 evalscope 按 token 生成长序列时必须在客户端套用一次模板来

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# zhipuEval 环境安装脚本
+# llm_server_eval 环境安装脚本
 #
 # 用法：
 #   ./install.sh                 # 装核心依赖（后端 + 前端构建）
@@ -164,10 +164,10 @@ install_agent() {
     fi
 
     if docker images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null \
-            | grep -qx 'zhipu-eval/uv-base:0.7.13'; then
-        ok "基础镜像 zhipu-eval/uv-base:0.7.13 存在"
+            | grep -qx 'llm-server-eval/uv-base:0.7.13'; then
+        ok "基础镜像 llm-server-eval/uv-base:0.7.13 存在"
     else
-        warn "缺少基础镜像 zhipu-eval/uv-base:0.7.13：Agent 任务镜像构建会失败"
+        warn "缺少基础镜像 llm-server-eval/uv-base:0.7.13：Agent 任务镜像构建会失败"
         warn "  重建命令见 develop.md 的「重建 uv-base」一节"
     fi
 }

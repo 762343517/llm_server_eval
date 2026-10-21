@@ -77,9 +77,9 @@
 | 位置 | 内容 |
 |---|---|
 | `backend/agent_core.py` | 新增 `MINI_SWE_AGENT_VERSION = "2.4.6"`、`MINI_SWE_AGENT_EXTRA_PACKAGES = ["mcp>=2.2.0,<3"]`；`build_command` 对 mini-swe-agent 追加两个 `--ak` |
-| pier `environments/agent_setup.py` | 新增 `DEFAULT_UV_BASE_IMAGE`；`write_agent_dockerfile` 在 `FROM` 后插入 `COPY --from=zhipu-eval/uv-base:0.7.13 /uv /opt/uv/bin/uv`；可用 `PIER_UV_BASE_IMAGE=""` 关闭 |
+| pier `environments/agent_setup.py` | 新增 `DEFAULT_UV_BASE_IMAGE`；`write_agent_dockerfile` 在 `FROM` 后插入 `COPY --from=llm-server-eval/uv-base:0.7.13 /uv /opt/uv/bin/uv`；可用 `PIER_UV_BASE_IMAGE=""` 关闭 |
 | pier `agents/installed/mini_swe_agent.py` | uv 安装改幂等（预置存在则跳过 curl）；`/opt/uv/bin` 加 PATH；`$HOME/.local/bin` 无条件加 PATH；构建期补建 `$HOME/.local/bin/env`；**运行期**命令与版本检测前置 `export PATH` + `[ -f env ] && . env` |
-| 镜像 | `zhipu-eval/uv-base:0.7.13`（debian-slim + uv 0.7.13，175 MB） |
+| 镜像 | `llm-server-eval/uv-base:0.7.13`（debian-slim + uv 0.7.13，175 MB） |
 
 ### G. 验证记录
 
@@ -126,5 +126,5 @@ curl -sSL "https://pypi.org/pypi/uv/0.7.13/json" \
   | xargs curl -sSL -o /tmp/uv.whl
 unzip -o -j /tmp/uv.whl "uv-0.7.13.data/scripts/uv" -d /tmp/uvbase/
 printf 'FROM debian:bookworm-slim\nCOPY uv /uv\nRUN chmod 0755 /uv\n' > /tmp/uvbase/Dockerfile
-docker build -t zhipu-eval/uv-base:0.7.13 /tmp/uvbase
+docker build -t llm-server-eval/uv-base:0.7.13 /tmp/uvbase
 ```

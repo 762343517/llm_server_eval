@@ -10,7 +10,7 @@
 ## 目录结构
 
 ```
-zhipuEval
+llm_server_eval
 ├── backend/               # FastAPI 后端
 │   ├── api.py             # HTTP 路由 + 托管前端产物（入口）
 │   ├── consts.py          # 端点/API Key 等连接默认值
@@ -87,7 +87,7 @@ python3 backend/simpleqa_eval.py --data dataset/HLE/test-00000-of-00001.parquet 
 ./packaging/build.sh --no-data       # 只打包程序，数据集另行准备
 ```
 
-产物：`dist/zhipu-eval-linux-x86_64-<日期>.tar.gz`，解压后 `./start.sh` 即可启动。
+产物：`dist/llm-server-eval-linux-x86_64-<日期>.tar.gz`，解压后 `./start.sh` 即可启动。
 数据目录 `dataset/`、`model/`、`runs/` 与可执行文件同级（可用 `APP_ROOT` 覆盖），
 路径基准统一由 `backend/runtime_paths.py` 提供：开发态指向项目根，打包后指向可执行文件
 所在目录，因此启动时的工作目录不再影响数据落盘位置。
@@ -352,11 +352,11 @@ evalscope 的 `connect_test` 耗尽 `--total-timeout`。
 ## 时间显示时区
 
 容器/服务器常以 UTC 运行，直接按系统时区渲染会使任务起止时间比本地时间少 8 小时。
-起止时间、任务日志、任务目录名（run_id）统一按 `ZHIPU_EVAL_TZ` 渲染，默认 `Asia/Shanghai`：
+起止时间、任务日志、任务目录名（run_id）统一按 `LLM_SERVER_EVAL_TZ` 渲染，默认 `Asia/Shanghai`：
 
 ```bash
-ZHIPU_EVAL_TZ=Asia/Shanghai python3 backend/api.py --host 0.0.0.0 --port 8000
-ZHIPU_EVAL_TZ=local python3 backend/api.py --host 0.0.0.0 --port 8000  # 沿用系统时区
+LLM_SERVER_EVAL_TZ=Asia/Shanghai python3 backend/api.py --host 0.0.0.0 --port 8000
+LLM_SERVER_EVAL_TZ=local python3 backend/api.py --host 0.0.0.0 --port 8000  # 沿用系统时区
 ```
 
 历史任务无需迁移：起止时间由落盘 epoch 重新计算，日志时间按写入进程当时的偏移整体平移。
@@ -371,9 +371,9 @@ ZHIPU_EVAL_TZ=local python3 backend/api.py --host 0.0.0.0 --port 8000  # 沿用�
 
 - 行首 `q7` / `j9` 为题号（生成 / 裁判），`stream` / `json` 表示是否流式；
 - 提示词正文、图片 data-url 与 API Key 不写入日志，仅保留长度摘要；
-- 时间按 `ZHIPU_EVAL_TZ` 渲染；`nohup ... >> runs/logs/webapp.log 2>&1 &` 启动时写入
+- 时间按 `LLM_SERVER_EVAL_TZ` 渲染；`nohup ... >> runs/logs/webapp.log 2>&1 &` 启动时写入
   `runs/logs/webapp.log`；
-- `ZHIPU_EVAL_LOG_REQ=0` 关闭该日志（重试的每次调用单独记录一行）。
+- `LLM_SERVER_EVAL_LOG_REQ=0` 关闭该日志（重试的每次调用单独记录一行）。
 
 ## 思考开关与强度
 

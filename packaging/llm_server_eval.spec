@@ -2,10 +2,10 @@
 """PyInstaller 打包配置：把 FastAPI 后端与 Vue 前端产物打成单文件可执行。
 
 用法：
-    python3 -m PyInstaller packaging/zhipu_eval.spec --noconfirm
+    python3 -m PyInstaller packaging/llm_server_eval.spec --noconfirm
 
-产物：dist/zhipu-eval（单文件，内置 Python 运行时）
-运行：把可执行文件放进发布目录（与 dataset/ model/ runs/ 同级）后 ./zhipu-eval
+产物：dist/llm-server-eval（单文件，内置 Python 运行时）
+运行：把可执行文件放进发布目录（与 dataset/ model/ runs/ 同级）后 ./llm-server-eval
 """
 import os
 
@@ -78,7 +78,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name="zhipu-eval",
+    name="llm-server-eval",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

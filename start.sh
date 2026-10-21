@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# zhipuEval 服务启动脚本
+# llm_server_eval 服务启动脚本
 #
 # 用法：
 #   ./start.sh                     # 前台启动，默认 0.0.0.0:8000

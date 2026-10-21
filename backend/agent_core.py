@@ -24,6 +24,7 @@ import subprocess
 import tempfile
 import threading
 import time
+import zipfile
 
 import adapters
 import consts
@@ -228,7 +229,7 @@ def refresh_images():
 
 def image_mirrors():
     """镜像加速器前缀列表：环境变量可覆盖，空串表示禁用（只用本机已有镜像）。"""
-    raw = os.environ.get("ZHIPU_EVAL_IMAGE_MIRRORS")
+    raw = os.environ.get("LLM_SERVER_EVAL_IMAGE_MIRRORS")
     if raw is None:
         return list(consts.DEFAULT_IMAGE_MIRRORS)
     return [p.strip().strip("/") for p in raw.split(",") if p.strip()]
@@ -1218,6 +1219,215 @@ def reclaim_orphans(runs_dir, on_event=None):
     return cleanup_projects(projects, on_event)
 
 
+# ------------------------------------------------------------------ 磁盘回收
+# 与上面容器回收的分工：reclaim_orphans 只管容器/网络/卷（pier 被中断时的残留），
+# 这里管镜像层与 buildkit 缓存——那部分 pier 的 `compose down --rmi all` 只撤 tag，
+# 层仍留在 /var/lib/containerd；而容器回收又刻意保留 tag 省 pull（见 clean_up 处注释），
+# 于是 docker 占用只进不出。必须按占用阈值主动回收，否则系统盘会被批量评测占满。
+_SIZE_UNITS = {"B": 1, "KB": 1024, "MB": 1024 ** 2, "GB": 1024 ** 3, "TB": 1024 ** 4}
+# `image prune` 输出 "Total reclaimed space: 223.1GB"，`builder prune` 输出 "Total:\t241.9GB"，
+# 两种尾部汇总都要能抓到，否则回收量恒为 0
+_RECLAIMED_RE = re.compile(r"Total(?:\s+reclaimed\s+space)?:?\s*([0-9.]+[KMGT]?B)", re.I)
+# docker 用 SI 单位显示（1GB=1000^3），这里按 1024 换算，对阈值判断只差几个百分点
+_SIZE_RE = re.compile(r"^\s*([0-9]*\.?[0-9]+)\s*([KMGT]?B)?\s*$", re.I)
+
+
+def _parse_size(text):
+    """把 docker 的 '223.2GB' / '175.2MB' / '0B' 解析成字节；解析不出返回 0。"""
+    match = _SIZE_RE.match(text or "")
+    if not match:
+        return 0
+    unit = (match.group(2) or "B").upper()
+    return int(float(match.group(1)) * _SIZE_UNITS.get(unit, 1))
+
+
+def _fmt_bytes(size):
+    """人类可读体积：>=1GiB 用 GB，否则用 MB。"""
+    size = max(0, int(size or 0))
+    if size >= 1024 ** 3:
+        return "{:.1f}GB".format(size / 1024 ** 3)
+    return "{:.0f}MB".format(size / 1024 ** 2)
+
+
+def docker_disk_usage():
+    """docker 当前占用字节数（镜像 + 构建缓存）；docker 不可用时返回 0。
+
+    只统计这两类：容器/卷由 reclaim_orphans 负责，且本地卷默认不占镜像层。
+    """
+    rc, out = _docker(["docker", "system", "df", "--format", "{{.Type}}|{{.Size}}"],
+                      timeout=60)
+    if rc != 0:
+        return 0
+    total = 0
+    for line in out.splitlines():
+        kind, _, size = line.partition("|")
+        if kind.strip() in ("Images", "Build Cache"):
+            total += _parse_size(size)
+    return total
+
+
+def docker_disk_limit():
+    """回收阈值（字节）：环境变量可覆盖，0 表示关闭自动回收。"""
+    raw = os.environ.get("LLM_SERVER_EVAL_DOCKER_DISK_LIMIT_GB")
+    value = utils.float_or(raw, consts.DEFAULT_DOCKER_DISK_LIMIT_GB) \
+        if raw is not None else consts.DEFAULT_DOCKER_DISK_LIMIT_GB
+    return int(max(0.0, value) * 1024 ** 3)
+
+
+def pier_uv_base_image():
+    """pier 实际会注入的 uv-base 镜像名；pier 不注入时返回空串。
+
+    「要不要维护 uv-base」必须由 pier 自己说了算，不能按本项目的偏好硬建：
+      * 全新安装的官方 pier，其 agent_setup.py 里没有 uv-base，Dockerfile 不会有
+        `COPY --from=<uv-base>`，它走自带的 curl 装 uv——此时维护 uv-base 只是白占
+        175MB，并在网络不通时打出一条与评测无关的「重建失败」；
+      * 打过本地补丁的 pier 才会注入，镜像被 prune 掉会让所有任务构建失败，只有这种
+        情况才必须重建（补丁不随 pier 安装分发，见 install.sh 的提示）。
+    判据直接读 pier 源码里有没有 uv-base，而不是记一个「我们打过」的标记：
+    重装/升级 pier 后标记会失真，读源码不会。
+    """
+    binary = pier_bin()
+    if not binary:
+        return ""
+    venv = os.path.dirname(os.path.dirname(os.path.realpath(binary)))
+    pattern = os.path.join(venv, "lib", "python3.*", "site-packages",
+                           "pier", "environments", "agent_setup.py")
+    patched = False
+    for path in sorted(glob.glob(pattern)):
+        try:
+            with open(path, encoding="utf-8", errors="replace") as fh:
+                if "uv-base" in fh.read():
+                    patched = True
+                    break
+        except OSError:
+            continue
+    if not patched:
+        return ""                      # 官方 pier 不读这个环境变量，返回空即不维护
+    # PIER_UV_BASE_IMAGE="" 是 pier 侧的关闭开关（回退到 curl 安装），这里同样认
+    return os.environ.get("PIER_UV_BASE_IMAGE", consts.UV_BASE_IMAGE).strip()
+
+
+def ensure_uv_base(on_event=None):
+    """确认 pier 依赖的 uv-base 基础镜像存在，缺失就地重建（约 175MB，只走 PyPI）。
+
+    打过补丁的 pier 生成的 Dockerfile 固定 `COPY --from=<uv-base>`，该镜像被 prune 掉
+    会让所有任务构建失败。而 docker 的 prune 没有「排除指定镜像」的过滤器，所以回收后
+    必须补回来。重建配方见 develop.md 2026-10-19 §F/§I。
+    """
+    emit = on_event or (lambda kind, payload=None: None)
+    image = pier_uv_base_image()
+    if not image:
+        return True                    # pier 不注入 uv-base，无需维护
+    refresh_images()
+    if image in known_images():
+        return True
+    emit("task_log", {"msg": "[回收] 重建基础镜像 {} …".format(image)})
+    # 镜像 tag 即 uv 版本（llm-server-eval/uv-base:0.7.13），自定义镜像也能对上
+    version = image.rsplit(":", 1)[-1] if ":" in image else consts.UV_BASE_UV_VERSION
+    tmp = tempfile.mkdtemp(prefix="uvbase-")
+    try:
+        rc, out = _run(["curl", "-sSL",
+                        "https://pypi.org/pypi/uv/{}/json".format(version)], timeout=120)
+        if rc != 0:
+            emit("task_log", {"msg": "[回收] 重建失败：取不到 uv {} 版本清单".format(version)})
+            return False
+        try:
+            urls = json.loads(out)["urls"]
+            url = next(u["url"] for u in urls
+                       if "manylinux" in u["filename"] and "x86_64" in u["filename"])
+        except (ValueError, KeyError, StopIteration):
+            emit("task_log", {"msg": "[回收] 重建失败：找不到 manylinux x86_64 的 uv wheel"})
+            return False
+
+        wheel = os.path.join(tmp, "uv.whl")
+        rc, _ = _run(["curl", "-sSL", "-o", wheel, url], timeout=300)
+        if rc != 0:
+            emit("task_log", {"msg": "[回收] 重建失败：uv wheel 下载失败"})
+            return False
+
+        # 本机不一定有 unzip，直接用 zipfile 解出 uv 二进制
+        binary = os.path.join(tmp, "uv")
+        try:
+            with zipfile.ZipFile(wheel) as zf:
+                member = next(n for n in zf.namelist() if n.endswith("data/scripts/uv"))
+                with zf.open(member) as src, open(binary, "wb") as dst:
+                    shutil.copyfileobj(src, dst)
+            os.chmod(binary, 0o755)
+        except (zipfile.BadZipFile, OSError, StopIteration) as exc:
+            emit("task_log", {"msg": "[回收] 重建失败：解包 uv 失败 {}".format(exc)})
+            return False
+
+        with open(os.path.join(tmp, "Dockerfile"), "w") as fh:
+            fh.write("FROM debian:bookworm-slim\nCOPY uv /uv\nRUN chmod 0755 /uv\n")
+        rc, out = _docker(["docker", "build", "-t", image, tmp], timeout=900)
+        if rc != 0:
+            emit("task_log", {"msg": "[回收] 重建失败：{}".format(_last_line(out))})
+            return False
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    refresh_images()
+    emit("task_log", {"msg": "[回收] 基础镜像已就绪：{}".format(image)})
+    return True
+
+
+def reclaim_disk(on_event=None, force=False):
+    """按占用阈值回收 docker 镜像层与 buildkit 缓存，返回回收摘要 dict。
+
+    两个前置条件（都不满足就不动手）：
+      * 占用超阈值才清——不然用户自己拉的镜像会被无故清空，阈值见
+        consts.DEFAULT_DOCKER_DISK_LIMIT_GB / LLM_SERVER_EVAL_DOCKER_DISK_LIMIT_GB；
+      * 没有 pier 任务在跑才清——prune -a 会删掉正在跑的任务镜像，等于把 run 打断。
+
+    顺序固定为 构建缓存 -> 镜像：前者不动任何镜像，先清它往往就够了，还能在磁盘
+    接近写满时先腾出重建 uv-base 的空间（磁盘满时连 docker build 都会失败）。
+    """
+    emit = on_event or (lambda kind, payload=None: None)
+    result = {"ran": False, "reason": "", "before": 0, "after": 0,
+              "builder": 0, "images": 0, "uv_base": None}
+    docker = docker_state()
+    if not docker["ok"]:
+        result["reason"] = "docker 不可用"
+        return result
+    limit = docker_disk_limit()
+    if limit <= 0:
+        result["reason"] = "自动回收已关闭（阈值 0）"
+        return result
+
+    before = docker_disk_usage()
+    result["before"] = before
+    if not force and before <= limit:
+        result["after"] = before
+        result["reason"] = "占用 {} 未超阈值 {}".format(_fmt_bytes(before), _fmt_bytes(limit))
+        return result
+    if active_pier_jobs():
+        result["after"] = before
+        result["reason"] = "有 pier 任务在跑，跳过以免误删在用镜像"
+        return result
+
+    result["ran"] = True
+    rc, out = _docker(["docker", "builder", "prune", "-a", "-f"], timeout=600)
+    match = _RECLAIMED_RE.search(out) if rc == 0 else None
+    result["builder"] = _parse_size(match.group(1)) if match else 0
+    if rc == 0:
+        emit("task_log", {"msg": "[回收] 清理构建缓存 {}".format(_fmt_bytes(result["builder"]))})
+
+    if docker_disk_usage() > limit:
+        rc, out = _docker(["docker", "image", "prune", "-a", "-f"], timeout=900)
+        match = _RECLAIMED_RE.search(out) if rc == 0 else None
+        result["images"] = _parse_size(match.group(1)) if match else 0
+        if rc == 0:
+            emit("task_log", {"msg": "[回收] 清理未使用镜像 {}".format(
+                _fmt_bytes(result["images"]))})
+        # uv-base 没有 prune 排除过滤器，只能清完补回来（pier 不注入时是空操作）
+        result["uv_base"] = ensure_uv_base(on_event)
+
+    result["after"] = docker_disk_usage()
+    emit("task_log", {"msg": "[回收] docker 占用 {} → {}".format(
+        _fmt_bytes(before), _fmt_bytes(result["after"]))})
+    return result
+
+
 # ------------------------------------------------------------------ 执行入口
 def run_agent_eval(cfg, on_event=None, should_stop=None):
     """执行一轮 Agent 评测（pier 逐任务起容器跑 agent，再跑测试判定 reward）。
@@ -1265,6 +1475,9 @@ def run_agent_eval(cfg, on_event=None, should_stop=None):
     argv, shown = build_command(cfg, directory, [t["name"] for t in selected],
                                 jobs_dir, job_name)
     on_event("task_log", {"msg": "[命令] " + shown})
+    # 拉镜像前先按阈值回收：批量评测会把镜像层与 buildkit 缓存堆到占满系统盘，
+    # 满了以后 docker pull / build 都会失败，整轮 run 会退化成「环境错误」
+    reclaim_disk(on_event=on_event)
     pending_images = [t for t in selected if not t["image_ready"] and t["docker_image"]]
     if pending_images:
         on_event("task_log", {"msg": "[镜像] {} 个任务的镜像不在本机，尝试拉取"
@@ -1278,7 +1491,7 @@ def run_agent_eval(cfg, on_event=None, should_stop=None):
             return None
         if failed:
             raise RuntimeError("以下任务镜像本机缺失且拉取失败：{}。请检查网络，或用 "
-                               "ZHIPU_EVAL_IMAGE_MIRRORS 指定可用的镜像加速器。".format(
+                               "LLM_SERVER_EVAL_IMAGE_MIRRORS 指定可用的镜像加速器。".format(
                                    "、".join(failed[:5])))
 
     started = time.time()

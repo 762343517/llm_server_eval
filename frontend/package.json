@@ -1,5 +1,5 @@
 {
-  "name": "zhipu-eval-webui",
+  "name": "llm-server-eval-webui",
   "private": true,
   "version": "1.0.0",
   "type": "module",

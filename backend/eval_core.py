@@ -327,8 +327,8 @@ def thinking_label(thinking, reasoning_effort=""):
 # ---------------------------------------------------------------- 请求日志
 # 每次调用 LLM 都按行记录实际请求参数，便于排查各厂商字段/取值差异；
 # 提示词正文、图片 data-url、API Key 一律不落日志，只保留长度摘要。
-# ZHIPU_EVAL_LOG_REQ=0 可整体关闭。
-_LOG_REQ = (os.environ.get("ZHIPU_EVAL_LOG_REQ") or "1").strip().lower() not in (
+# LLM_SERVER_EVAL_LOG_REQ=0 可整体关闭。
+_LOG_REQ = (os.environ.get("LLM_SERVER_EVAL_LOG_REQ") or "1").strip().lower() not in (
     "0", "false", "no", "off")
 
 class _TZFormatter(logging.Formatter):
@@ -342,7 +342,7 @@ class _TZFormatter(logging.Formatter):
         return utils.format_ts(record.created, datefmt or utils.TIME_FMT, self._tz)
 
 
-logger = logging.getLogger("zhipu_eval")
+logger = logging.getLogger("llm_server_eval")
 if not logger.handlers:  # 自带 stderr handler，保证 INFO 在 uvicorn/CLI 下都可见
     _handler = logging.StreamHandler(sys.stderr)
     _handler.setFormatter(_TZFormatter())

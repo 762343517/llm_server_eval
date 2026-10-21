@@ -8,7 +8,7 @@ Python / pip / Node.js 即可启动服务。
 ```bash
 ./start.sh                 # 默认 0.0.0.0:8000
 HOST=127.0.0.1 PORT=8080 ./start.sh
-./zhipu-eval --help        # 也可直接调用可执行文件
+./llm-server-eval --help        # 也可直接调用可执行文件
 ```
 
 启动后浏览器访问 `http://<机器IP>:8000/`。停止用 `Ctrl+C`。
@@ -16,14 +16,14 @@ HOST=127.0.0.1 PORT=8080 ./start.sh
 后台运行：
 
 ```bash
-nohup ./zhipu-eval --host 0.0.0.0 --port 8000 > service.log 2>&1 &
+nohup ./llm-server-eval --host 0.0.0.0 --port 8000 > service.log 2>&1 &
 ```
 
 ## 目录约定
 
 ```
-zhipu-eval-<版本>/
-├── zhipu-eval     可执行文件（内置运行时，勿删除）
+llm-server-eval-<版本>/
+├── llm-server-eval     可执行文件（内置运行时，勿删除）
 ├── start.sh       启动脚本
 ├── dataset/       数据集与 Agent 任务（datasets.json 为清单）
 ├── model/         分词器目录，压力测试下拉框的候选来源
@@ -31,7 +31,7 @@ zhipu-eval-<版本>/
 ```
 
 `dataset/`、`model/`、`runs/` 必须与可执行文件**同级**。若要把数据放到别处，
-设置环境变量 `APP_ROOT=/data/zhipu-eval` 再启动。前端产物已内置，不需要 `frontend/`。
+设置环境变量 `APP_ROOT=/data/llm-server-eval` 再启动。前端产物已内置，不需要 `frontend/`。
 
 ## 可选外部组件
 
@@ -51,5 +51,5 @@ zhipu-eval-<版本>/
 
 ## 升级
 
-用新版本的可执行文件覆盖 `zhipu-eval` 即可，`dataset/`、`model/`、`runs/` 保持不变；
+用新版本的可执行文件覆盖 `llm-server-eval` 即可，`dataset/`、`model/`、`runs/` 保持不变；
 如果新版本改了数据集清单，按需替换 `dataset/datasets.json`。
