@@ -56,6 +56,17 @@
         "framework": "pier",
         "tasks": "."
       }
+    },
+    {
+      "name": "terminal-bench-verify",
+      "title": "Terminal-Bench 2.1 verify",
+      "file": "*/task.toml",
+      "runnable": false,
+      "note": "GLM官方增强的终端 Agent 任务集，集成了terminal-bench 2.1的改进",
+      "agent": {
+        "framework": "pier",
+        "tasks": "."
+      }
     }
   ]
 }

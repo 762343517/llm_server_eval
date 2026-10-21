@@ -220,7 +220,10 @@ const submit = async () => {
   submitting.value = true
   try {
     const { run_id: runId } = await api.stressStart({ ...form })
-    router.push(`/stress/${runId}`)
+    // 列表先落地；导航被中止（旧构建的按需加载 chunk 失效）时整页跳转兜底
+    loadRuns()
+    await router.push(`/stress/${runId}`).catch(() => {})
+    if (router.currentRoute.value.path !== `/stress/${runId}`) window.location.assign(`/stress/${runId}`)
   } catch (e) {
     error.value = e.message
   } finally {

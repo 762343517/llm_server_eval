@@ -241,7 +241,12 @@ const submit = async () => {
   submitting.value = true
   try {
     const { run_id: runId } = await api.agentStart(buildCfg())
-    router.push(`/agent/${runId}`)
+    // 先把列表刷新掉：详情页导航万一失败（旧构建的按需加载 chunk 失效），
+    // 至少本页能立刻看到刚提交的任务，不会表现为「点了没反应、列表也没有」。
+    loadRuns()
+    await router.push(`/agent/${runId}`).catch(() => {})
+    // 导航被中止时（chunk 404 等）整页跳转兜底：浏览器会重新取 index.html 与新 chunk
+    if (router.currentRoute.value.path !== `/agent/${runId}`) window.location.assign(`/agent/${runId}`)
   } catch (e) {
     error.value = e.message
   } finally {

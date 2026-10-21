@@ -720,6 +720,9 @@ _ENVIRONMENT_HINTS = (
     "network", "connection", "dns", "proxy", "pull access denied",
     "manifest unknown", "could not find a version",
     "no matching distribution", "install failed", "installation failed",
+    # compose/buildkit 的构建失败与端口/资源冲突：消息里不一定带 docker/container 字样
+    "failed to solve", "port is already allocated", "address already in use",
+    "no such image", "oci runtime",
 )
 
 

@@ -107,7 +107,10 @@ const submit = async () => {
       ...form,
       data: form.data_custom || form.data,
     })
-    router.push(`/accuracy/${runId}`)
+    // 列表先落地；导航被中止（旧构建的按需加载 chunk 失效）时整页跳转兜底
+    loadRuns()
+    await router.push(`/accuracy/${runId}`).catch(() => {})
+    if (router.currentRoute.value.path !== `/accuracy/${runId}`) window.location.assign(`/accuracy/${runId}`)
   } catch (e) {
     error.value = e.message
   } finally {

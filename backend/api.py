@@ -43,11 +43,30 @@ WEBUI_DIR = runtime_paths.webui_dir()
 
 accuracy = run_manager.RunManager()
 stress = perf_manager.StressManager()
+def _agent_worker(cfg, on_event=None, should_stop=None):
+    """跑一轮 Agent 评测，收尾时按阈值回收 docker 镜像层与构建缓存。
+
+    pier 每个 trial 结束会自己 `compose down --rmi all`，容器不会残留；但那条命令
+    只撤镜像 tag，构建层与 buildkit 缓存仍留在 /var/lib/containerd，一轮批量评测
+    （200+ 任务）就能堆到上百 GB。原先只在「服务启动」和「下一轮开跑前」回收，
+    跑完到下次启动之间的空窗期磁盘只增不减，所以这里补一次收尾回收。
+    reclaim_disk 自己会判阈值、并且有 pier 在跑时跳过，不会误删在用镜像。
+    """
+    try:
+        return agent_core.run_agent_eval(cfg, on_event=on_event,
+                                        should_stop=should_stop)
+    finally:
+        try:
+            agent_core.reclaim_disk(on_event=on_event)
+        except Exception:          # 回收失败不能影响任务结果与状态落盘
+            pass
+
+
 # Agent 评测单独占用 runs/agent/，避免与精度测试的任务列表互相混入
 AGENT_SUBDIR = "agent"
 agent = run_manager.RunManager(
     runs_dir=os.path.abspath(os.path.join(run_manager.RUNS_DIR, AGENT_SUBDIR)),
-    kind="agent", worker=agent_core.run_agent_eval,
+    kind="agent", worker=_agent_worker,
     csv_columns=run_manager.AGENT_CSV_COLUMNS)
 
 
@@ -910,6 +929,20 @@ def agent_file(run_id: str, path: str = "", download: bool = False):
 
 
 # ---------------------------------------------------------------- 前端 SPA
+# 静态资源的缓存口径：assets 文件名带内容 hash，可以长缓存；index.html 必须每次校验。
+# 否则前端重新构建后，浏览器仍用缓存的旧 index.html，它引用的按需加载 chunk 已被删除，
+# 点「启动」后的路由跳转会在加载详情页 chunk 时 404——导航被静默中止，表现为点了没反应。
+@app.middleware("http")
+async def _static_cache(request, call_next):
+    resp = await call_next(request)
+    path = request.url.path
+    if path.startswith("/assets/"):
+        resp.headers.setdefault("Cache-Control", "public, max-age=31536000, immutable")
+    elif (resp.headers.get("content-type") or "").startswith("text/html"):
+        resp.headers.setdefault("Cache-Control", "no-cache, must-revalidate")
+    return resp
+
+
 def _placeholder():
     """前端产物未构建时的占位页面。"""
     return HTMLResponse(
